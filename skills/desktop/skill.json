@@ -1,0 +1,22 @@
+{
+  "name": "desktop",
+  "description": "Organize, clean up, or manage files on the desktop or in folders. Use when the user wants to: organize the desktop, sort files into folders, clean up downloads, move files by type, rename files, find duplicate files, or tidy up any directory.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "What to organize and how (e.g. 'organize my desktop by file type')"
+      },
+      "target_dir": {
+        "type": "string",
+        "description": "Directory to organize. Default: Desktop"
+      },
+      "dry_run": {
+        "type": "boolean",
+        "description": "If true, only show what would happen without moving files"
+      }
+    },
+    "required": ["request"]
+  }
+}

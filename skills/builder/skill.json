@@ -1,0 +1,18 @@
+{
+  "name": "builder",
+  "description": "Builds complete software projects from a description. Use when the user wants to create, develop, code, or program anything: apps, tools, scripts, games, APIs, CLIs, libraries, bots, or any other software. Also use for editing or extending existing projects.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "The full project description or modification request from the user"
+      },
+      "language_hint": {
+        "type": "string",
+        "description": "Optional: programming language if explicitly mentioned by user"
+      }
+    },
+    "required": ["request"]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "knowledge",
+  "description": "Search, query, and manage the user's personal knowledge base. Use when the user wants to: find information in their documents, search emails, look up notes, query PDFs, ask about stored knowledge, index new files or folders, recall previous information, or find something they saved. Also handles: 'what did I write about X', 'find that email about Y', 'search my notes for Z'.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "The search query or action request from the user"
+      },
+      "action": {
+        "type": "string",
+        "description": "Action to perform: 'search' (default), 'ingest' (add file/folder), 'status' (show DB stats)",
+        "enum": ["search", "ingest", "status"]
+      },
+      "path": {
+        "type": "string",
+        "description": "File or folder path to ingest (only for action=ingest)"
+      },
+      "top_k": {
+        "type": "integer",
+        "description": "Number of results to return (default: 5, max: 20)"
+      }
+    },
+    "required": ["request"]
+  }
+}

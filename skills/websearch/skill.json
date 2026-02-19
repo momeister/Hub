@@ -1,0 +1,18 @@
+{
+  "name": "websearch",
+  "description": "Search the web for information, news, documentation, tutorials, or answers. Use when the user wants to: search the internet, look something up online, find information about a topic, get current news, find documentation, research something, or needs up-to-date information that may not be in the knowledge base.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "The search query or question to look up online"
+      },
+      "num_results": {
+        "type": "integer",
+        "description": "Number of results to return (default: 5, max: 10)"
+      }
+    },
+    "required": ["request"]
+  }
+}

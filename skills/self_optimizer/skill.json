@@ -1,0 +1,23 @@
+{
+  "name": "self_optimizer",
+  "description": "Self-improving AI agent that analyzes, modifies, tests, and optimizes the AI HUB codebase or generates new experiments. Use when the user wants to optimize, improve, refactor, self-modify, or run autonomous improvement cycles on the codebase.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "What to optimize or improve. Can be a specific task or 'auto' for AI-chosen improvements."
+      },
+      "mode": {
+        "type": "string",
+        "description": "Mode: 'task' for specific task, 'auto' for AI-decided improvements",
+        "enum": ["task", "auto"]
+      },
+      "iterations": {
+        "type": "integer",
+        "description": "Number of optimization iterations (0 = infinite until stopped)"
+      }
+    },
+    "required": ["request"]
+  }
+}

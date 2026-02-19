@@ -1,0 +1,25 @@
+# AI Hub — Python Dependencies
+
+# Telegram
+python-telegram-bot==21.6
+
+# LLM Client
+openai>=1.50.0
+httpx>=0.27.0
+
+# Rich Terminal Output
+rich>=13.7.0
+
+# System Monitoring
+psutil>=5.9.0
+
+# Knowledge System (RAG)
+chromadb>=0.4.0
+pymupdf>=1.23.0
+watchdog>=3.0.0
+
+# Web Search
+duckduckgo-search>=4.0.0
+
+# Audio (Voicebox REST API — uses httpx already listed above)
+# faster-whisper and pyttsx3 replaced by Voicebox server

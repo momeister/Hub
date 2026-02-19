@@ -1,0 +1,35 @@
+{
+  "name": "audio",
+  "description": "Speech-to-text transcription (Voicebox Whisper) and text-to-speech generation (Voicebox TTS with voice cloning). Use when the user wants to: transcribe audio, convert speech to text, read text aloud, text-to-speech, TTS, STT, transcribe a voice message, generate speech, clone a voice, speak in a specific language, use a voice profile, or list voice profiles.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "What to do: transcribe audio, generate speech, manage profiles"
+      },
+      "action": {
+        "type": "string",
+        "description": "Action: 'stt' (speech-to-text), 'tts' (text-to-speech), 'profiles' (list profiles), 'status' (Voicebox health)",
+        "enum": ["stt", "tts", "profiles", "status"]
+      },
+      "path": {
+        "type": "string",
+        "description": "Path to audio file (for STT)"
+      },
+      "text": {
+        "type": "string",
+        "description": "Text to speak (for TTS, max 5000 chars)"
+      },
+      "language": {
+        "type": "string",
+        "description": "Language code: en, zh, ja, ko, de, fr, ru, pt, es, it"
+      },
+      "profile_id": {
+        "type": "string",
+        "description": "Voice profile ID (for TTS with voice cloning)"
+      }
+    },
+    "required": ["request"]
+  }
+}

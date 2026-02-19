@@ -1,0 +1,14 @@
+{
+  "name": "chat",
+  "description": "Have a conversation with the AI assistant. Use when the user wants to: chat, ask questions, discuss topics, get explanations, brainstorm, or have any general conversation that does not involve building software, generating images, downloading files, or organizing the desktop.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "The user's message or question"
+      }
+    },
+    "required": ["request"]
+  }
+}

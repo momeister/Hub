@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Environment
+.env
+
+# Virtual Environments
+.venv/
+venv/
+
+# Output
+output/
+
+# Temp Files
+tmpclaude-*
+*.tmp
+.screenshot.png
+
+# Optimizer
+DOWNLOAD_REQUESTS.md
+INTERNET_REQUESTS.md
+.optimizer_approval_signal
+.optimizer_state.json

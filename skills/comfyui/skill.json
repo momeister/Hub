@@ -1,0 +1,42 @@
+{
+  "name": "comfyui",
+  "description": "Generate images using AI (ComfyUI). Smart dispatch: auto-selects Flux (img2img, modify existing image) or Z_Turbo (text-to-image, create from scratch). Supports transparent background removal for sprites/icons. Use when the user wants to: create an image, generate art, draw something, make a picture, visualize something, generate a photo, create artwork, modify an image, remove background, create a sprite, or use Stable Diffusion / Flux / WAN image generation.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Text description of the image to generate. Include 'transparent background' or 'sprite' for background removal."
+      },
+      "model": {
+        "type": "string",
+        "description": "Workflow/model name (optional, auto-detected). Available: image_flux2 (img2img), image_z_image_turbo (txt2img), image_flux2_baackgroundRemove, image_z_image_turbo_backgroundRemove"
+      },
+      "negative": {
+        "type": "string",
+        "description": "Things to avoid in the image (negative prompt)"
+      },
+      "width": {
+        "type": "integer",
+        "description": "Image width in pixels (default: 1248, auto landscape/portrait)"
+      },
+      "height": {
+        "type": "integer",
+        "description": "Image height in pixels (default: 821, auto landscape/portrait)"
+      },
+      "steps": {
+        "type": "integer",
+        "description": "Number of sampling steps (default: 20)"
+      },
+      "amount": {
+        "type": "integer",
+        "description": "Number of images to generate (default: 1)"
+      },
+      "reference_image_path": {
+        "type": "string",
+        "description": "Path to a reference/input image. If provided, Flux (img2img) is auto-selected."
+      }
+    },
+    "required": ["prompt"]
+  }
+}

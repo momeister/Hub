@@ -1,0 +1,23 @@
+{
+  "name": "downloader",
+  "description": "Download files, games, videos, or updates. Use when the user wants to: download a game (Steam), download a video (YouTube), download a file from a URL, update a game, get something from the internet.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "string",
+        "description": "What to download (URL, game name, YouTube link, etc.)"
+      },
+      "type": {
+        "type": "string",
+        "enum": ["url", "steam", "youtube", "auto"],
+        "description": "Download type: url=direct download, steam=Steam game, youtube=video, auto=detect"
+      },
+      "destination": {
+        "type": "string",
+        "description": "Optional: destination folder. Default: ~/Downloads"
+      }
+    },
+    "required": ["request"]
+  }
+}
