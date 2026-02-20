@@ -109,3 +109,39 @@ class BaseAgent:
     def cancel(self) -> None:
         """Agent abbrechen."""
         self._cancel_event.set()
+
+    def llm_session(
+        self,
+        model: str,
+        session_messages: list[dict],
+        max_tokens: int = 16384,
+        temperature: float = 0.05,
+    ) -> tuple[str, list[dict]]:
+        """
+        LLM-Aufruf mit vollständigem Gesprächsverlauf.
+        Gibt (antwort, aktualisierte_messages) zurück.
+        Das Modell sieht alle vorherigen Turns im selben Kontext.
+        """
+        if self._cancel_event.is_set():
+            raise AgentTimeout(f"{self.AGENT_NAME} wurde abgebrochen")
+
+        from core.llm_client import get_client, BASE_URL_V1
+        import re
+
+        client = get_client(BASE_URL_V1)
+        response = client.chat.completions.create(
+            model=model,
+            messages=session_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        raw = response.choices[0].message.content or ""
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+        updated = session_messages + [{"role": "assistant", "content": raw}]
+        return raw, updated
+
+    def estimate_session_tokens(self, messages: list[dict]) -> int:
+        """Grobe Token-Schätzung für eine Message-Liste (4 Zeichen ≈ 1 Token)."""
+        total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        return total_chars // 4

@@ -44,7 +44,7 @@ class DeveloperAgent(BaseAgent):
         files = self.list_project_files()
         summaries = []
         total_chars = 0
-        max_chars = 50000
+        max_chars = 300000
 
         for fpath in files:
             if total_chars > max_chars:
@@ -53,7 +53,7 @@ class DeveloperAgent(BaseAgent):
                 )
                 break
             content = self.read_project_file(fpath)
-            preview = content[:500] if len(content) > 500 else content
+            preview = content[:3000] if len(content) > 3000 else content
             summaries.append(f"=== {fpath} ({len(content)} chars) ===\n{preview}")
             total_chars += len(preview)
 
@@ -88,14 +88,32 @@ class DeveloperAgent(BaseAgent):
 
         # Schluessel-Dateien fuer Kontext lesen
         key_files_content = ""
-        key_files = [
-            "main.py", "core/config.py", "core/dispatcher.py",
-            "requirements.txt",
+        # Immer laden: Einstiegspunkte und Config
+        base_files = ["main.py", "core/config.py", "requirements.txt"]
+
+        # Aufgaben-relevante Dateien: alle Dateien aus dem Projekt deren Name
+        # im Task-Text vorkommt (case-insensitive Substring-Match auf Dateiname)
+        task_lower = task.lower()
+        all_files = self.list_project_files()
+        relevant_files = [
+            f for f in all_files
+            if any(
+                part in task_lower
+                for part in [
+                    os.path.basename(f).replace(".py", "").lower(),
+                    os.path.dirname(f).replace("/", " ").lower(),
+                ]
+                if len(part) > 3  # Kurze Namen wie "os" ignorieren
+            )
         ]
+
+        key_files = list(dict.fromkeys(base_files + relevant_files[:10]))
+
+        # Jeden Key-File vollständig laden (kein Limit mehr)
         for kf in key_files:
             content = self.read_project_file(kf)
             if content:
-                key_files_content += f"\n=== {kf} ===\n{content[:2000]}\n"
+                key_files_content += f"\n=== {kf} ===\n{content}\n"
 
         prompt = f"""You are a senior developer planning code changes for this project.
 
@@ -158,6 +176,8 @@ Plan the implementation. Output ONLY this JSON:
     def develop(self, plan: dict) -> dict:
         """
         Plan ausfuehren: Code-Dateien generieren/modifizieren.
+        Alle Dateien werden erst in Memory generiert (mit Session-Kontext),
+        danach zusammen auf Festplatte geschrieben.
 
         Returns:
         {
@@ -171,8 +191,15 @@ Plan the implementation. Output ONLY this JSON:
             model=self.coding_model,
         )
 
-        changes = []
         files_to_modify = plan.get("files_to_modify", [])
+
+        # Session initialisieren
+        session_messages = [
+            {"role": "system", "content":
+                "Expert Python developer working on an AI Hub project. "
+                "Output ONLY code, no markdown fences, no explanation."}
+        ]
+        planned_changes = []  # Erst sammeln
 
         for file_spec in files_to_modify:
             path = file_spec["path"]
@@ -185,7 +212,7 @@ Plan the implementation. Output ONLY this JSON:
                 continue
 
             if action == "delete":
-                changes.append({"path": path, "action": "delete", "content": ""})
+                planned_changes.append({"path": path, "action": "delete", "content": ""})
                 continue
 
             # Bestehenden Inhalt lesen falls Modifikation
@@ -234,24 +261,45 @@ RULES:
 4. NEVER include API keys, tokens, or secrets
 5. Output ONLY code, no markdown fences, no explanation"""
 
-            code = self.llm(
+            session_messages.append({"role": "user", "content": prompt})
+            code, session_messages = self.llm_session(
                 model=self.coding_model,
-                prompt=prompt,
-                system="Expert Python developer. Output ONLY code.",
+                session_messages=session_messages,
                 max_tokens=16384,
                 temperature=0.05,
             )
             code = strip_code_fences(code)
+            planned_changes.append({"path": path, "action": action, "content": code})
+            self.blog.info(f"Developer generiert (noch nicht geschrieben): {path}")
 
-            # Auf Festplatte schreiben
-            full_path = os.path.join(self.project_dir, path)
-            write_file(full_path, code)
+            # Token-Budget prüfen: bei >75% des 128k Fensters Session komprimieren
+            if self.estimate_session_tokens(session_messages) > 96000:
+                self.blog.warning("Session-Kontext nähert sich Limit — komprimiere")
+                written_so_far = {c["path"]: c["content"] for c in planned_changes}
+                context_summary = "\n\n".join(
+                    f"=== {p} (bereits generiert) ===\n{c}"
+                    for p, c in written_so_far.items()
+                )
+                session_messages = [
+                    session_messages[0],  # System-Prompt behalten
+                    {"role": "user", "content":
+                        f"Kontext aus vorherigen Generierungen:\n\n{context_summary}\n\n"
+                        f"Weiter mit der nächsten Datei."},
+                    {"role": "assistant", "content":
+                        "Verstanden. Ich kenne alle bisher generierten Dateien."},
+                ]
 
-            changes.append({"path": path, "action": action, "content": code})
-            self.blog.info(f"Developer schrieb: {path} ({len(code)} chars)")
+        # Erst jetzt alle auf Festplatte schreiben
+        for change in planned_changes:
+            if change["action"] != "delete":
+                full_path = os.path.join(self.project_dir, change["path"])
+                write_file(full_path, change["content"])
+                self.blog.info(
+                    f"Developer schrieb: {change['path']} ({len(change['content'])} chars)"
+                )
 
         return {
-            "files": changes,
+            "files": planned_changes,
             "description": plan.get("description", ""),
         }
 
@@ -268,7 +316,7 @@ RULES:
             if f["path"] != target_path:
                 content = self.read_project_file(f["path"])
                 if content:
-                    related.append(f"=== {f['path']} ===\n{content[:3000]}")
+                    related.append(f"=== {f['path']} ===\n{content}")
 
         # Imports aus bestehender Datei folgen
         existing = self.read_project_file(target_path)
@@ -278,6 +326,6 @@ RULES:
                 imp_path = imp.replace(".", "/") + ".py"
                 content = self.read_project_file(imp_path)
                 if content and imp_path != target_path:
-                    related.append(f"=== {imp_path} ===\n{content[:2000]}")
+                    related.append(f"=== {imp_path} ===\n{content}")
 
         return "\n\n".join(related[:5]) if related else "(keine verwandten Dateien)"

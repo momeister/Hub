@@ -22,6 +22,7 @@ from core.utils import clean_json_output
 from skills.self_optimizer.agents.developer import DeveloperAgent
 from skills.self_optimizer.agents.tester import TesterAgent
 from skills.self_optimizer.agents.reviewer import ReviewerAgent, ReviewDecision
+from skills.self_optimizer.agents.code_reviewer import CodeReviewerAgent
 from skills.self_optimizer.git_manager import GitManager
 from skills.self_optimizer.docker_sandbox import OptimizerSandbox
 from skills.self_optimizer.approval import ApprovalManager
@@ -101,6 +102,7 @@ class OptimizationEngine:
         self.developer: Optional[DeveloperAgent] = None
         self.tester: Optional[TesterAgent] = None
         self.reviewer: Optional[ReviewerAgent] = None
+        self.code_reviewer: Optional[CodeReviewerAgent] = None
 
     # ------------------------------------------------------------------
     # Start / Stop
@@ -141,6 +143,12 @@ class OptimizationEngine:
             blog=self.blog,
         )
         self.reviewer = ReviewerAgent(
+            project_dir=self.project_dir,
+            reasoning_model=reasoning_model,
+            config=self.config,
+            blog=self.blog,
+        )
+        self.code_reviewer = CodeReviewerAgent(
             project_dir=self.project_dir,
             reasoning_model=reasoning_model,
             config=self.config,
@@ -263,6 +271,44 @@ class OptimizationEngine:
 
                 if self._should_stop():
                     break
+
+                # PHASE 3b: Code-Review (inhaltliche Qualitätsprüfung)
+                if not self._should_stop():
+                    code_review = self.code_reviewer.review_code(
+                        task=task,
+                        changes=changes,
+                    )
+                    code_review_passed = code_review.get("passed", True)
+                    code_review_score = code_review.get("quality_score", 5)
+                    code_review_summary = code_review.get("summary", "")
+
+                    self._notify(
+                        f"*Optimizer — Code-Review*\n\n"
+                        f"Score: {code_review_score}/10\n"
+                        f"_{code_review_summary[:300]}_"
+                    )
+
+                    # Bei kritischen Issues direkt RETRY ohne den finalen Reviewer zu belasten
+                    if not code_review_passed:
+                        run.consecutive_errors += 1
+                        run.total_errors += 1
+                        issues_text = "\n".join(
+                            f"- [{i.get('severity', '')}] {i.get('file', '')}: {i.get('description', '')}"
+                            for i in code_review.get("issues", [])
+                            if i.get("severity") == "critical"
+                        )
+                        self._transition(OptimizerState.ROLLING_BACK)
+                        self.git.rollback_experimental()
+                        run.task_description = (
+                            f"{task}\n\n[CODE-REVIEW FEHLGESCHLAGEN]\n"
+                            f"Kritische Issues:\n{issues_text}\n"
+                            f"Cross-File: {', '.join(code_review.get('cross_file_issues', []))}"
+                        )
+                        continue  # Retry mit Feedback
+
+                    # Code-Review-Ergebnis dem finalen Reviewer mitgeben
+                    test_result["code_review_score"] = code_review_score
+                    test_result["code_review_summary"] = code_review_summary
 
                 # PHASE 4: Review
                 self._transition(OptimizerState.REVIEWING)

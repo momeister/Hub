@@ -63,7 +63,7 @@ class ReviewerAgent(BaseAgent):
             path = change["path"]
             action = change["action"]
             content = change.get("content", "")
-            preview = content[:3000] if content else "(geloescht)"
+            preview = content if content else "(geloescht)"
             files_summary.append(f"=== {path} ({action}) ===\n{preview}")
 
         files_context = "\n\n".join(files_summary)
@@ -81,6 +81,17 @@ TEST RESULTS:
   Exit code: {test_result.get('exit_code', -1)}
   Output: {test_result.get('output', '')[:2000]}
   Errors: {test_result.get('errors', [])}
+  Note: {
+        'KEIN Test-Framework im Projekt vorhanden. Der Code wurde nur '
+        'syntaktisch und per Import geprüft, NICHT funktional getestet. '
+        'Sei bei der Review-Entscheidung entsprechend strenger.'
+        if test_result.get('output', '').startswith('NO_TESTS') else
+        'Tests wurden ausgeführt.'
+    }
+
+CODE REVIEW (inhaltliche Qualitätsprüfung):
+  Score: {test_result.get('code_review_score', 'nicht durchgeführt')}/10
+  Summary: {test_result.get('code_review_summary', 'nicht verfügbar')}
 
 Review criteria:
 1. CORRECTNESS: Does the code implement the task correctly?

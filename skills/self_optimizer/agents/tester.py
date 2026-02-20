@@ -99,6 +99,19 @@ class TesterAgent(BaseAgent):
         # Schritt 3: Tests ausfuehren falls vorhanden
         if self.sandbox:
             test_ok, test_output = self.sandbox.run_tests(self.project_dir)
+
+            # "Keine Tests" als neutrales Signal erkennen
+            if "Keine Tests gefunden" in test_output or "No tests found" in test_output:
+                results["output"] = (
+                    "NO_TESTS: Kein Test-Framework vorhanden — "
+                    "nur Import-Check durchgeführt"
+                )
+                self.blog.verify(
+                    True, "tester",
+                    "Kein Test-Framework — nur Syntax/Import geprüft"
+                )
+                return results
+
             results["output"] = test_output
 
             if not test_ok:
