@@ -166,6 +166,7 @@ RULES:
   8. Keep the stack MINIMAL - fewer dependencies = fewer problems
   9. Each file's "purpose" must be specific and actionable, NOT vague
   10. For Python web backends, the entry point MUST include uvicorn/flask startup code
+  11. ONLY use packages that ACTUALLY EXIST on PyPI/npm/crates.io - do NOT hallucinate package names
 
 OUTPUT: A single JSON object with this exact schema:
 """ + """{

@@ -81,6 +81,58 @@ def _wait_for_approval(timeout: int = 7200) -> str:
     return "cancelled"  # timeout
 
 
+# -- Manifest type lookup for each language --------------------------------
+_LANG_MANIFEST = {
+    "python":     ("requirements_txt", "requirements.txt"),
+    "javascript": ("package_json",     "package.json"),
+    "typescript": ("package_json",     "package.json"),
+    "rust":       ("cargo_toml",       "Cargo.toml"),
+    "go":         ("go_mod",           "go.mod"),
+}
+
+
+def _extract_sub_dependencies(
+    master_blueprint: dict,
+    sub_name: str,
+    sub_lang: str,
+    sub_files: list[dict],
+) -> dict:
+    """Extract dependency info for a subproject from the master blueprint.
+
+    Strategy (in priority order):
+    1. If master ``dependencies.content`` is non-empty AND the master
+       dependency type matches this subproject's language, use it directly.
+    2. If the sub_files list contains a manifest file for this language
+       (e.g. ``requirements.txt``, ``package.json``), extract its content
+       from the file spec so the Retriever can write it.
+    3. Return a stub with the correct *type* so Agent Retriever knows it
+       must generate a manifest even when ``content`` is empty.
+    """
+    manifest_info = _LANG_MANIFEST.get(sub_lang.lower())
+    if not manifest_info:
+        return {}
+
+    dep_type, manifest_filename = manifest_info
+
+    # --- Strategy 1: master-level deps match this subproject's language ---
+    master_deps = master_blueprint.get("dependencies") or {}
+    if master_deps.get("content") and master_deps.get("type") == dep_type:
+        return dict(master_deps)  # shallow copy
+
+    # --- Strategy 2: manifest content lives inside sub_files spec ---------
+    for fspec in sub_files:
+        fname = fspec.get("file", "")
+        if fname.endswith(manifest_filename):
+            # The file spec itself may carry a description that lists deps
+            desc = fspec.get("description", "")
+            if desc:
+                return {"type": dep_type, "content": "", "_hint": desc}
+            break
+
+    # --- Strategy 3: stub so Retriever generates one ----------------------
+    return {"type": dep_type, "content": ""}
+
+
 def build_single_language_project(
     goal: str,
     blueprint: dict,
@@ -241,7 +293,7 @@ def build_project(
                     "is_multi_language": False,
                     "files": sub_files,
                     "dependency_order": sub_dep_order,
-                    "dependencies": {},
+                    "dependencies": _extract_sub_dependencies(blueprint, sub_name, sub_lang, sub_files),
                     "architecture_decisions": blueprint.get("architecture_decisions", []),
                     "safe_stack_violations": [],
                     "estimated_complexity": blueprint.get("estimated_complexity", "medium"),

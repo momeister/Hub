@@ -277,6 +277,65 @@ Output ONLY JSON."""
 
 
 # ---------------------------------------------------------------------------
+# Helper: generate a dependency manifest from blueprint file list
+# ---------------------------------------------------------------------------
+def _generate_manifest_from_blueprint(
+    ws: dict, manifest_name: str, dep_type: str, output_dir: str
+) -> None:
+    """Use the LLM to generate a dependency manifest when one was not provided.
+
+    This happens for subprojects in multi-language builds where the master
+    blueprint's dependencies block doesn't cover each sub-language.
+    """
+    blueprint = ws["blueprint"]
+    files_desc = "\n".join(
+        f"  - {f['path']}: {f.get('purpose', '')}"
+        for f in blueprint.get("files", [])[:30]
+    )
+    hint = blueprint.get("dependencies", {}).get("_hint", "")
+    goal = blueprint.get("_goal", ws.get("goal", ""))
+    framework = blueprint.get("framework", "")
+    language = blueprint.get("language", "")
+
+    prompt = f"""Generate the content for a **{manifest_name}** file for this project.
+
+PROJECT GOAL: {goal}
+LANGUAGE: {language}
+FRAMEWORK: {framework}
+FILES:
+{files_desc}
+
+{"DEPENDENCY HINTS: " + hint if hint else ""}
+
+RULES:
+- Only include packages that ACTUALLY EXIST on PyPI / npm / crates.io.
+- Do NOT invent or hallucinate package names.
+- Include the framework itself (e.g. fastapi, flask, express, react).
+- Include any libraries obviously needed by the file descriptions.
+- For requirements.txt: one package per line, pin major versions (e.g. fastapi>=0.100).
+- For package.json: valid JSON with name, version, dependencies, and scripts.
+- Output ONLY the raw file content, no markdown fences, no explanation."""
+
+    try:
+        response = llm_call(
+            model=ws.get("coder_model") or ws.get("manager_model", ""),
+            prompt=prompt,
+            system="You are a dependency manifest generator. Output ONLY the file content.",
+            max_tokens=1024,
+            temperature=0.05,
+        )
+        content = strip_fences(response).strip()
+        if content:
+            manifest_path = os.path.join(output_dir, manifest_name)
+            write_file(manifest_path, content)
+            blog.info(f"Generated {manifest_name} via LLM ({len(content)} bytes)")
+            # Update blueprint deps so downstream agents can see it
+            blueprint["dependencies"]["content"] = content
+    except Exception as exc:
+        blog.warning(f"Failed to generate {manifest_name}: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Agent 2: RETRIEVER
 # ---------------------------------------------------------------------------
 def agent_retriever(ws: dict) -> dict:
@@ -317,21 +376,27 @@ def agent_retriever(ws: dict) -> dict:
 
     # Write dependency manifest if provided in blueprint
     deps = blueprint.get("dependencies", {})
-    if deps.get("content"):
-        manifest_map = {
-            "requirements_txt": "requirements.txt",
-            "package_json": "package.json",
-            "cargo_toml": "Cargo.toml",
-            "go_mod": "go.mod",
-            "pom_xml": "pom.xml",
-        }
-        dep_type = deps.get("type", "")
-        manifest_name = manifest_map.get(dep_type)
-        if manifest_name:
-            manifest_path = os.path.join(output_dir, manifest_name)
-            if not os.path.exists(manifest_path):
-                write_file(manifest_path, deps["content"])
-                blog.info(f"Wrote manifest: {manifest_name}")
+    dep_type = deps.get("type", "")
+    manifest_map = {
+        "requirements_txt": "requirements.txt",
+        "package_json": "package.json",
+        "cargo_toml": "Cargo.toml",
+        "go_mod": "go.mod",
+        "pom_xml": "pom.xml",
+    }
+    manifest_name = manifest_map.get(dep_type)
+
+    if deps.get("content") and manifest_name:
+        # Master blueprint provided explicit manifest content
+        manifest_path = os.path.join(output_dir, manifest_name)
+        if not os.path.exists(manifest_path):
+            write_file(manifest_path, deps["content"])
+            blog.info(f"Wrote manifest: {manifest_name}")
+    elif dep_type and manifest_name and not deps.get("content"):
+        # Type is known but content is empty (common for subprojects).
+        # Generate a manifest via LLM based on the blueprint's file list.
+        blog.info(f"Generating {manifest_name} from blueprint (no content provided)")
+        _generate_manifest_from_blueprint(ws, manifest_name, dep_type, output_dir)
 
     blog.info(f"Retriever validated {len(blueprint.get('files', []))} files, language={language}")
     return ws
@@ -490,16 +555,31 @@ def agent_executor(ws: dict) -> dict:
         for e in errors[:10]:
             blog.error(e, severity="compile")
 
-    # Install dependencies in venv before sandbox
-    if language == "python":
-        req_path = os.path.join(output_dir, "requirements.txt")
-        if os.path.exists(req_path):
-            blog.info("Installing dependencies in virtual environment...")
-            dep_ok, dep_msg = install_deps(output_dir, language)
+    # Install dependencies before sandbox test
+    _MANIFEST_FOR_LANG = {
+        "python":     "requirements.txt",
+        "javascript": "package.json",
+        "typescript": "package.json",
+        "rust":       "Cargo.toml",
+        "go":         "go.mod",
+    }
+    manifest_file = _MANIFEST_FOR_LANG.get(language, "")
+    if manifest_file:
+        manifest_path = os.path.join(output_dir, manifest_file)
+        if os.path.exists(manifest_path):
+            blog.info(f"Installing & validating dependencies ({manifest_file})...")
+            # validate_manifest handles install + repair loop in one call
+            dep_ok = validate_manifest(
+                output_dir, language,
+                ws.get("coder_model") or ws.get("manager_model", ""),
+            )
             if dep_ok:
-                blog.verify(True, "deps_install", "Dependencies installed in venv")
+                blog.verify(True, "deps_install", f"Dependencies OK ({language})")
             else:
-                blog.warning(f"Dependency install issue: {dep_msg}")
+                blog.warning(f"Dependency issues could not be fully resolved for {manifest_file}")
+                ws["errors"].append(f"deps_install: {manifest_file} has unresolved dependency errors")
+        else:
+            blog.warning(f"No {manifest_file} found — dependencies may be missing")
 
     # Sandbox test
     blog.phase("sandbox_test", "Sandbox: checking if project starts and runs")
@@ -538,16 +618,37 @@ def agent_critic(ws: dict) -> dict:
     if not ws["sandbox_ok"] and written_files:
         sandbox_output = ws.get("sandbox_output", "")
         if sandbox_output:
-            for attempt in range(MAX_SANDBOX_RETRIES):
-                blog.phase(
-                    "critic_repair",
-                    f"Critic repair attempt {attempt + 1}/{MAX_SANDBOX_RETRIES}",
-                    model=coder_model,
-                )
+            # Check if failure is a dependency problem first
+            _dep_repair_attempted = False
+            dep_keywords = ["ModuleNotFoundError", "ImportError", "Cannot find module",
+                            "MODULE_NOT_FOUND", "no matching distribution",
+                            "Could not find a version"]
+            if any(kw.lower() in sandbox_output.lower() for kw in dep_keywords):
+                blog.info("Critic: sandbox failure looks like a dependency issue, repairing manifest")
+                dep_ok = validate_manifest(output_dir, language, coder_model)
+                _dep_repair_attempted = True
+                if dep_ok:
+                    # Re-test after dep fix
+                    test_ok, test_output = sandbox_test(output_dir, language)
+                    if test_ok:
+                        blog.verify(True, "critic_dep_fix", "Fixed by repairing dependencies")
+                        ws["sandbox_ok"] = True
+                        sandbox_output = ""
+                    else:
+                        sandbox_output = test_output
 
-                # Diagnose the failure
-                file_list = "\n".join(f"  - {p}" for p in sorted(written_files.keys())[:20])
-                diag_prompt = f"""A {language} project failed at runtime. Diagnose the failure.
+            # Code repair loop (only if still failing)
+            if not ws["sandbox_ok"] and sandbox_output:
+                for attempt in range(MAX_SANDBOX_RETRIES):
+                    blog.phase(
+                        "critic_repair",
+                        f"Critic repair attempt {attempt + 1}/{MAX_SANDBOX_RETRIES}",
+                        model=coder_model,
+                    )
+
+                    # Diagnose the failure
+                    file_list = "\n".join(f"  - {p}" for p in sorted(written_files.keys())[:20])
+                    diag_prompt = f"""A {language} project failed at runtime. Diagnose the failure.
 
 ERROR OUTPUT:
 {sandbox_output[:2000]}
@@ -562,50 +663,50 @@ Output ONLY this JSON:
   "fix_strategy": "<how to fix it>"
 }"""
 
-                problem_file = None
-                fix_context = ""
-                try:
-                    diag_response = llm_call(
-                        model=coder_model,
-                        prompt=diag_prompt,
-                        system="Expert debugger. Output only valid JSON.",
-                        max_tokens=1536,
-                        temperature=0.05,
-                    )
-                    diag = json.loads(clean_json(diag_response))
-                    if isinstance(diag, dict) and "file" in diag:
-                        pf = diag["file"]
-                        if pf in written_files:
-                            problem_file = pf
-                        else:
-                            for fpath in written_files:
-                                if os.path.basename(fpath) == os.path.basename(pf):
-                                    problem_file = fpath
-                                    break
-                        if problem_file:
-                            fix_context = (
-                                f"\nDIAGNOSIS: {diag.get('root_cause', '')}\n"
-                                f"FIX STRATEGY: {diag.get('fix_strategy', '')}\n"
-                            )
-                            blog.info(f"Critic identified problem: {problem_file}")
-                except Exception:
-                    pass
+                    problem_file = None
+                    fix_context = ""
+                    try:
+                        diag_response = llm_call(
+                            model=coder_model,
+                            prompt=diag_prompt,
+                            system="Expert debugger. Output only valid JSON.",
+                            max_tokens=1536,
+                            temperature=0.05,
+                        )
+                        diag = json.loads(clean_json(diag_response))
+                        if isinstance(diag, dict) and "file" in diag:
+                            pf = diag["file"]
+                            if pf in written_files:
+                                problem_file = pf
+                            else:
+                                for fpath in written_files:
+                                    if os.path.basename(fpath) == os.path.basename(pf):
+                                        problem_file = fpath
+                                        break
+                            if problem_file:
+                                fix_context = (
+                                    f"\nDIAGNOSIS: {diag.get('root_cause', '')}\n"
+                                    f"FIX STRATEGY: {diag.get('fix_strategy', '')}\n"
+                                )
+                                blog.info(f"Critic identified problem: {problem_file}")
+                    except Exception:
+                        pass
 
-                if not problem_file:
-                    # Fallback: find entry point
-                    for entry in ["main.py", "src/main.rs", "main.go", "index.js", "index.ts", "app.py"]:
-                        if entry in written_files:
-                            problem_file = entry
-                            break
+                    if not problem_file:
+                        # Fallback: find entry point
+                        for entry in ["main.py", "src/main.rs", "main.go", "index.js", "index.ts", "app.py"]:
+                            if entry in written_files:
+                                problem_file = entry
+                                break
 
-                if not problem_file:
-                    blog.warning("Critic cannot identify file to repair")
-                    break
+                    if not problem_file:
+                        blog.warning("Critic cannot identify file to repair")
+                        break
 
-                code = written_files[problem_file]
-                blog.repair(problem_file, attempt + 1, MAX_SANDBOX_RETRIES)
+                    code = written_files[problem_file]
+                    blog.repair(problem_file, attempt + 1, MAX_SANDBOX_RETRIES)
 
-                repair_prompt = f"""The following {language} project was generated but FAILED at runtime.
+                    repair_prompt = f"""The following {language} project was generated but FAILED at runtime.
 
 ERROR OUTPUT:
 {sandbox_output[:3000]}
@@ -618,33 +719,33 @@ CURRENT CODE:
 Fix the runtime error. Output ONLY the corrected complete code for {problem_file}.
 No explanation, no fences."""
 
-                try:
-                    response = llm_call(
-                        model=coder_model,
-                        prompt=repair_prompt,
-                        system=f"Expert {language} developer. Fix runtime errors. Output ONLY code.",
-                        max_tokens=14336,
-                        temperature=0.05,
-                    )
-                    repaired = strip_fences(response)
-                    full_path = os.path.join(output_dir, problem_file)
-                    write_file(full_path, repaired)
-                    written_files[problem_file] = repaired
-                    blog.info(f"Repaired {problem_file} ({len(repaired)} chars)")
-                except Exception as exc:
-                    blog.warning(f"Repair failed: {exc}")
-                    break
+                    try:
+                        response = llm_call(
+                            model=coder_model,
+                            prompt=repair_prompt,
+                            system=f"Expert {language} developer. Fix runtime errors. Output ONLY code.",
+                            max_tokens=14336,
+                            temperature=0.05,
+                        )
+                        repaired = strip_fences(response)
+                        full_path = os.path.join(output_dir, problem_file)
+                        write_file(full_path, repaired)
+                        written_files[problem_file] = repaired
+                        blog.info(f"Repaired {problem_file} ({len(repaired)} chars)")
+                    except Exception as exc:
+                        blog.warning(f"Repair failed: {exc}")
+                        break
 
-                # Re-test
-                test_ok, test_output = sandbox_test(output_dir, language)
-                if test_ok:
-                    blog.verify(True, "critic_sandbox", f"Fixed on attempt {attempt + 1}")
-                    ws["sandbox_ok"] = True
-                    break
-                sandbox_output = test_output
-                blog.warning(f"Still failing after repair attempt {attempt + 1}")
-            else:
-                blog.warning("Critic exhausted all repair attempts")
+                    # Re-test
+                    test_ok, test_output = sandbox_test(output_dir, language)
+                    if test_ok:
+                        blog.verify(True, "critic_sandbox", f"Fixed on attempt {attempt + 1}")
+                        ws["sandbox_ok"] = True
+                        break
+                    sandbox_output = test_output
+                    blog.warning(f"Still failing after repair attempt {attempt + 1}")
+                else:
+                    blog.warning("Critic exhausted all repair attempts — project may have issues")
 
     # UX Polish phase (uses manager model for suggestions, coder for applying)
     if written_files:
