@@ -23,6 +23,7 @@ except ImportError:
     print("[FATAL] python-telegram-bot nicht installiert")
     sys.exit(1)
 
+from core.memory import get_memory
 from core.skill_registry import get_available_skills
 from core.telegram.handlers.callbacks import cb_handler
 from core.telegram.handlers.dispatcher import cmd_chat, cmd_stop, msg_handler
@@ -62,6 +63,13 @@ def main():
     info(f"Builder image    : {BUILDER_IMAGE}")
     info(f"Output dir       : {OUTPUT_BASE}")
     info(f"Skills           : {', '.join(get_available_skills())}")
+
+    # Memory-System initialisieren
+    try:
+        memory = get_memory()
+        info(f"Memory geladen   : {len(memory._facts)} Facts, {len(memory._projects)} Projects")
+    except Exception as exc:
+        log.warning(f"Memory-System nicht gestartet: {exc}")
 
     try:
         from skills.knowledge.watcher import start_watcher, is_watcher_running

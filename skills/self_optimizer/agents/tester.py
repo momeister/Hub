@@ -124,7 +124,9 @@ class TesterAgent(BaseAgent):
             if not os.path.exists(full_path):
                 continue
             try:
-                py_compile.compile(full_path, doraise=True)
+                # doraise=True wirft bei Syntax-Fehler,
+                # cfile=os.devnull verhindert .pyc Erzeugung
+                py_compile.compile(full_path, doraise=True, cfile=os.devnull)
             except py_compile.PyCompileError as exc:
                 errors.append(f"{path}: {exc}")
         return len(errors) == 0, errors

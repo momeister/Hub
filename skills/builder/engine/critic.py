@@ -131,10 +131,15 @@ Be strict but practical. Output ONLY JSON."""
             elif action == "change_language":
                 new_lang = patch.get("language", "")
                 reason = patch.get("reason", "")
-                blog.warning(
-                    f"Critic suggests language change: {language} -> {new_lang} ({reason}). "
-                    "Skipping - would require full re-architecture."
-                )
+                if new_lang and new_lang != language:
+                    blog.warning(f"Critic changing language: {language} -> {new_lang} ({reason})")
+                    # Blueprint zurücksetzen und neu architekturieren mit festgelegter Sprache
+                    from skills.builder.engine.blueprint import architect_phase
+                    new_blueprint = architect_phase(
+                        goal + f"\n\nIMPORTANT: Use {new_lang}. Do NOT use {language}.",
+                        manager_model,
+                    )
+                    return new_blueprint
 
         if patched:
             blog.info("Blueprint patched by critic")
@@ -167,19 +172,22 @@ PROJECT FILES:
 {file_list}
 
 Determine:
-1. Which SINGLE file is most likely the root cause
+1. Which file(s) are the root cause (can be multiple if the bug spans files)
 2. What went wrong (1 sentence)
 3. How to fix it (1 sentence)
+4. Whether this is a cross-file issue
 
 Output ONLY this JSON:
 """ + """{
-  "file": "<path of file to fix>",
+  "files": ["<path of file to fix>", "<optional second file>"],
   "root_cause": "<what went wrong>",
-  "fix_strategy": "<how to fix it>"
+  "fix_strategy": "<how to fix it>",
+  "is_cross_file": true/false
 }
 
 RULES:
-  - "file" MUST be one of the project files listed above
+  - "files" MUST contain only project files listed above
+  - Use 1 file for single-file bugs, 2+ for cross-file issues
   - Be specific, not generic
   - Output ONLY JSON"""
 
@@ -194,28 +202,44 @@ RULES:
 
         raw = json.loads(clean_json(response))
 
-        if not isinstance(raw, dict) or "file" not in raw:
+        if not isinstance(raw, dict):
             blog.warning("Critic diagnosis returned invalid format")
             return {}
 
-        file_to_fix = raw.get("file", "")
+        # Support both old single-file and new multi-file format
+        files_to_fix = raw.get("files", [])
+        if not files_to_fix:
+            single = raw.get("file", "")
+            files_to_fix = [single] if single else []
+
         root_cause = raw.get("root_cause", "Unknown")
         fix_strategy = raw.get("fix_strategy", "")
+        is_cross_file = raw.get("is_cross_file", len(files_to_fix) > 1)
 
-        if file_to_fix not in written_files:
-            for fpath in written_files:
-                if os.path.basename(fpath) == os.path.basename(file_to_fix):
-                    file_to_fix = fpath
-                    break
+        # Validate and resolve file paths
+        resolved_files = []
+        for file_to_fix in files_to_fix:
+            if file_to_fix in written_files:
+                resolved_files.append(file_to_fix)
             else:
-                blog.warning(f"Critic identified {file_to_fix} but it's not in project files")
-                return {}
+                for fpath in written_files:
+                    if os.path.basename(fpath) == os.path.basename(file_to_fix):
+                        resolved_files.append(fpath)
+                        break
+                else:
+                    blog.warning(f"Critic identified {file_to_fix} but it's not in project files")
 
-        blog.info(f"Critic diagnosis: {file_to_fix} - {root_cause}")
+        if not resolved_files:
+            blog.warning("No valid files identified by critic diagnosis")
+            return {}
+
+        blog.info(f"Critic diagnosis: {', '.join(resolved_files)} - {root_cause}")
         return {
-            "file": file_to_fix,
+            "files": resolved_files,
+            "file": resolved_files[0],  # backward compat
             "root_cause": root_cause,
             "fix_strategy": fix_strategy,
+            "is_cross_file": is_cross_file,
         }
 
     except Exception as exc:

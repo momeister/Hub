@@ -23,3 +23,6 @@ duckduckgo-search>=4.0.0
 
 # Audio (Voicebox REST API — uses httpx already listed above)
 # faster-whisper and pyttsx3 replaced by Voicebox server
+
+# Scheduler (HeartbeatScheduler — Cron-Jobs, Health-Checks)
+apscheduler>=3.10

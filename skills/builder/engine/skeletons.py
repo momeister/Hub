@@ -47,13 +47,20 @@ Output format:
 
 RULES (CRITICAL):
   1. ALL files in ONE response
-  2. Signatures/types/interfaces ONLY
-  3. For functions: signature + pass/... (no impl)
-  4. For structs/classes: fields + method signatures
-  5. Imports must be CORRECT (use the exports list)
-  6. NO implementation bodies
-  7. Config files (Cargo.toml, package.json, etc.) should be COMPLETE
-  8. For dependency manifests (requirements.txt, package.json, Cargo.toml):
+  2. Signatures/types/interfaces ONLY — but annotated
+  3. For every function: signature + one-line comment with EXACT return format
+     JS example:   // returns: {{from:[row,col], to:[row,col], capture:piece|null}}
+     Py example:   # returns: list[tuple[int,int]] — all valid (row,col) positions
+     Rust example: // returns: Ok(Vec<Move>) or Err(InvalidMoveError)
+  4. For every shared data structure: add a concrete example as comment
+     JS example:   // Board: board[row][col] = "wK"|"bP"|null, row 0 = rank 8
+     Py example:   # GameState: {{"board": [[str|None]*8]*8, "turn": "w"|"b",
+     #               "castling": {{"wK":bool,...}}, "en_passant": [row,col]|None}}
+  5. For structs/classes: fields + method signatures
+  6. Imports must be CORRECT (use the exports list)
+  7. NO implementation bodies
+  8. Config files (Cargo.toml, package.json, etc.) should be COMPLETE
+  9. For dependency manifests (requirements.txt, package.json, Cargo.toml):
      - Do NOT pin exact versions (no ==1.2.3)
      - Use loose version constraints (>=1.0 or just the package name)
      - Only include packages that ACTUALLY EXIST on PyPI/npm/crates.io
@@ -89,14 +96,21 @@ def fill_in_file(
 
     ctx_parts = []
 
-    ctx_parts.append("=== ALL FILE SKELETONS (reference for imports/types) ===")
-    for sk_path, sk_code in all_skeletons.items():
-        ctx_parts.append(f"\n=== {sk_path} ===\n{sk_code}")
-
     if written_files:
-        ctx_parts.append("\n\n=== ALREADY IMPLEMENTED FILES ===")
+        ctx_parts.append("=== ALREADY IMPLEMENTED FILES (full code) ===")
         for w_path, w_code in written_files.items():
-            ctx_parts.append(f"\n=== {w_path} ===\n{w_code[:3000]}")
+            ctx_parts.append(f"\n=== {w_path} (fully implemented) ===\n{w_code}")
+
+    pending = {p: c for p, c in all_skeletons.items() if p not in written_files}
+    if pending:
+        ctx_parts.append("=== PENDING FILES (skeleton only, not yet implemented) ===")
+        for sk_path, sk_code in pending.items():
+            ctx_parts.append(f"\n=== {sk_path} ===\n{sk_code}")
+    if written_files:
+        ctx_parts.append(
+            f"\n=== ALREADY IMPLEMENTED: {', '.join(written_files.keys())} "
+            f"(full code shown above) ==="
+        )
 
     deps = blueprint.get("dependencies", {})
     if deps.get("content"):

@@ -19,22 +19,31 @@ def self_correct(
     written_files: dict,
     error_output: str,
 ) -> dict:
-    """One repair iteration: feed sandbox error back to coder."""
+    """One repair iteration: feed sandbox error back to coder.
+
+    Supports multi-file diagnosis: if is_cross_file, repairs all
+    affected files sequentially, updating written_files between each
+    repair so the next file sees the fixed version.
+    """
     blog.phase("self_correction", "Feeding sandbox error back to coder for repair", model=coder_model)
 
     diagnosis = critic_diagnose_failure(error_output, written_files, language, coder_model)
-    problem_file = diagnosis.get("file")
+    problem_files = diagnosis.get("files", [])
+    is_cross_file = diagnosis.get("is_cross_file", False)
     fix_context = ""
 
-    if problem_file and diagnosis.get("root_cause"):
+    if problem_files and diagnosis.get("root_cause"):
         fix_context = (
             f"\nDIAGNOSIS: {diagnosis['root_cause']}\n"
             f"FIX STRATEGY: {diagnosis.get('fix_strategy', '')}\n"
         )
-        blog.info(f"Critic identified: {problem_file}")
+        if is_cross_file:
+            fix_context += f"CROSS-FILE ISSUE: affects {', '.join(problem_files)}\n"
+        blog.info(f"Critic identified: {', '.join(problem_files)}")
     else:
         blog.info("Critic diagnosis unavailable, using regex heuristics")
 
+        problem_file = None
         path_match = re.search(r"(?:^|\s)([\w./\\]+\.[\w]+)(?::\d+)", error_output, re.MULTILINE)
         if path_match:
             matched = path_match.group(1)
@@ -56,14 +65,32 @@ def self_correct(
                     problem_file = entry
                     break
 
-    if not problem_file:
-        blog.warning("Cannot identify which file to repair")
-        return written_files
+        if not problem_file:
+            blog.warning("Cannot identify which file to repair")
+            return written_files
 
-    code = written_files[problem_file]
-    blog.repair(problem_file, 1, 1)
+        problem_files = [problem_file]
 
-    prompt = f"""The following {language} project was generated but FAILED at runtime.
+    # Repair each affected file sequentially
+    for problem_file in problem_files:
+        if problem_file not in written_files:
+            blog.warning(f"File {problem_file} not in written_files, skipping repair")
+            continue
+
+        code = written_files[problem_file]
+        blog.repair(problem_file, 1, 1)
+
+        # Include other affected files' current code for cross-file context
+        cross_file_ctx = ""
+        if is_cross_file:
+            other_files = [f for f in problem_files if f != problem_file and f in written_files]
+            if other_files:
+                parts = []
+                for of in other_files:
+                    parts.append(f"=== {of} ===\n{written_files[of][:10000]}")
+                cross_file_ctx = f"\n\nRELATED FILES (also affected):\n" + "\n\n".join(parts)
+
+        prompt = f"""The following {language} project was generated but FAILED at runtime.
 
 ERROR OUTPUT:
 {error_output[:3000]}
@@ -72,25 +99,26 @@ FILE TO FIX: {problem_file}
 
 CURRENT CODE:
 {code[:10000]}
+{cross_file_ctx}
 
 Fix the runtime error. Output ONLY the corrected complete code for {problem_file}.
 No explanation, no fences."""
 
-    system = f"Expert {language} developer. Fix runtime errors. Output ONLY code."
+        system = f"Expert {language} developer. Fix runtime errors. Output ONLY code."
 
-    response = llm_call(
-        model=coder_model,
-        prompt=prompt,
-        system=system,
-        max_tokens=14336,
-        temperature=0.05,
-    )
+        response = llm_call(
+            model=coder_model,
+            prompt=prompt,
+            system=system,
+            max_tokens=14336,
+            temperature=0.05,
+        )
 
-    repaired = strip_fences(response)
-    full_path = os.path.join(output_dir, problem_file)
-    write_file(full_path, repaired)
-    written_files[problem_file] = repaired
+        repaired = strip_fences(response)
+        full_path = os.path.join(output_dir, problem_file)
+        write_file(full_path, repaired)
+        written_files[problem_file] = repaired
 
-    blog.info(f"Repaired {problem_file} ({len(repaired)} chars)")
+        blog.info(f"Repaired {problem_file} ({len(repaired)} chars)")
 
     return written_files

@@ -138,9 +138,7 @@ def build_project(
     ws = make_workspace(goal, manager_model, coder_model, output_dir, ctx_tokens)
     ws = agent_planner(ws)
     blueprint = ws["blueprint"]
-
-    # Agent 1b: Critic review of blueprint (still manager model)
-    blueprint = critic_review_blueprint(goal, blueprint, manager_model)
+    # Critic läuft bereits intern in agent_planner — kein zweiter Call nötig
 
     if os.environ.get("TRIGGERED_BY") == "telegram":
         file_paths = [f["path"] for f in blueprint.get("files", [])]
@@ -251,3 +249,19 @@ def build_project(
         elapsed_sec=elapsed,
         output_dir=output_dir,
     )
+
+    # Projekt in Memory speichern
+    try:
+        from core.memory import get_memory
+        memory = get_memory()
+        lang = blueprint.get("language", "?")
+        fw = blueprint.get("framework", "")
+        proj_name = blueprint.get("project_name", os.path.basename(output_dir))
+        memory.add_project(
+            name=proj_name,
+            language=lang,
+            summary=goal[:200],
+            framework=fw,
+        )
+    except Exception:
+        pass  # Memory ist optional

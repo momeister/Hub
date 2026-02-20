@@ -14,6 +14,78 @@ from skills.builder.engine.manifest import validate_manifest
 from skills.builder.engine.repair import repair_file
 from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file
 from skills.builder.engine.context import write_file
+from core.llm_client import call_builder_session
+from core.utils import estimate_tokens, strip_code_fences
+
+
+def _compress_session(
+    session_messages: list[dict],
+    language: str,
+    written_files: dict,
+) -> list[dict]:
+    """
+    Baut eine neue Session auf mit geschriebenem Code als Kontext
+    statt dem vollständigen Gesprächsverlauf.
+    Bewahrt den System-Prompt, verwirft den alten Chat-Verlauf,
+    fügt alle bereits geschriebenen Dateien als eine kompakte
+    user-Message ein.
+    """
+    system_msg = session_messages[0]  # System-Prompt behalten
+    code_summary = "\n\n".join(
+        f"=== {path} (already written) ===\n{code}"
+        for path, code in written_files.items()
+    )
+    return [
+        system_msg,
+        {"role": "user", "content":
+            f"Context from previous session — these files are already written:\n\n"
+            f"{code_summary}\n\nContinue with the next file."},
+        {"role": "assistant", "content":
+            "Understood. I have the context of all written files. "
+            "Ready for the next file."},
+    ]
+
+
+def _build_fill_in_prompt(
+    file_spec: dict,
+    all_skeletons: dict,
+    written_files: dict,
+    blueprint: dict,
+) -> str:
+    """Build the fill-in prompt for a file (without LLM call)."""
+    path = file_spec["path"]
+    purpose = file_spec.get("purpose", "")
+    language = blueprint["language"]
+
+    ctx_parts = []
+
+    pending = {p: c for p, c in all_skeletons.items() if p not in written_files}
+    if pending:
+        ctx_parts.append("=== PENDING FILES (skeleton only, not yet implemented) ===")
+        for sk_path, sk_code in pending.items():
+            ctx_parts.append(f"\n=== {sk_path} ===\n{sk_code}")
+
+    deps = blueprint.get("dependencies", {})
+    if deps.get("content"):
+        ctx_parts.append(f"\n\n=== DEPENDENCIES ({deps.get('type', '')}) ===\n{deps['content']}")
+
+    context = "\n".join(ctx_parts)
+
+    return f"""Implement the file: {path}
+
+Purpose: {purpose}
+
+{context}
+
+OUTPUT:
+Complete implementation for {path}. Output ONLY the code, no fences, no explanation.
+
+RULES:
+  1. Use EXACT imports from skeletons
+  2. Full implementation, no placeholders
+  3. Follow {language} idioms
+  4. Handle errors properly
+  5. Add brief comments for complex logic"""
 
 
 def skeleton_fill_in_generate(
@@ -61,6 +133,12 @@ def skeleton_fill_in_generate(
     written_files: dict[str, str] = {}
     file_index = 0
 
+    # Persistent builder session
+    session_messages = [
+        {"role": "system", "content": f"Expert {language} developer. "
+         "Output ONLY code, no markdown fences, no explanation."}
+    ]
+
     for file_path in dep_order:
         file_spec = next((f for f in files if f["path"] == file_path), None)
         if not file_spec:
@@ -70,7 +148,23 @@ def skeleton_fill_in_generate(
         file_index += 1
         blog.file_start(file_path, file_index, files_total)
 
-        code = fill_in_file(file_spec, skeletons, written_files, blueprint, coder_model, ctx_tokens)
+        # Token-Budget prüfen vor jedem Call
+        estimated = estimate_tokens(str(session_messages))
+        max_session_tokens = int(ctx_tokens * 0.75)  # 75% für Input, 25% für Output
+        if estimated > max_session_tokens:
+            blog.warning("Session context near limit — compressing history")
+            session_messages = _compress_session(session_messages, language, written_files)
+
+        fill_in_prompt = _build_fill_in_prompt(file_spec, skeletons, written_files, blueprint)
+        session_messages.append({"role": "user", "content": fill_in_prompt})
+
+        raw_code, session_messages = call_builder_session(
+            model=coder_model,
+            session_messages=session_messages,
+            max_tokens=14336,
+            temperature=0.1,
+        )
+        code = strip_code_fences(raw_code)
 
         full_path = os.path.join(output_dir, file_path)
         write_file(full_path, code)

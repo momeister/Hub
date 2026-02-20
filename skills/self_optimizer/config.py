@@ -19,8 +19,8 @@ class OptimizerConfig:
     test_timeout: int = 60             # Docker Test-Ausfuehrung
 
     # Fehler-Schwellen
-    max_consecutive_errors: int = 3
-    max_total_errors: int = 10
+    max_consecutive_errors: int = 5
+    max_total_errors: int = 15
     max_iterations: int = 100          # Hard Cap auch fuer infinite
 
     # Docker Container-Limits
@@ -50,8 +50,8 @@ class OptimizerConfig:
             tester_timeout=int(os.environ.get("OPT_TESTER_TIMEOUT", "120")),
             reviewer_timeout=int(os.environ.get("OPT_REVIEWER_TIMEOUT", "180")),
             test_timeout=int(os.environ.get("OPT_TEST_TIMEOUT", "60")),
-            max_consecutive_errors=int(os.environ.get("OPT_MAX_CONSEC_ERRORS", "3")),
-            max_total_errors=int(os.environ.get("OPT_MAX_TOTAL_ERRORS", "10")),
+            max_consecutive_errors=int(os.environ.get("OPT_MAX_CONSEC_ERRORS", "5")),
+            max_total_errors=int(os.environ.get("OPT_MAX_TOTAL_ERRORS", "15")),
             max_iterations=int(os.environ.get("OPT_MAX_ITERATIONS", "100")),
             container_memory_limit=os.environ.get("OPT_CONTAINER_MEMORY", "512m"),
             container_cpu_limit=os.environ.get("OPT_CONTAINER_CPU", "2"),

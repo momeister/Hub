@@ -128,6 +128,65 @@ def call(
     raise last_exc
 
 
+def call_builder_session(
+    model: str,
+    session_messages: list[dict],
+    base_url: str = BASE_URL_V1,
+    max_tokens: int = 14336,
+    temperature: float = 0.1,
+) -> tuple[str, list[dict]]:
+    """
+    Wie call(), aber erhält und gibt den vollständigen Message-Verlauf zurück.
+    Gibt (generated_code, updated_messages) zurück.
+    Das Modell sieht alle vorherigen assistant-Antworten im selben Kontext.
+    """
+    client = get_client(base_url)
+    last_exc: Exception = RuntimeError("Kein Versuch")
+
+    kwargs: dict = dict(
+        model=model,
+        messages=session_messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    for attempt in range(1, LLM_MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(**kwargs)
+            raw = response.choices[0].message.content or ""
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+            if not raw and attempt < LLM_MAX_RETRIES:
+                log.warning(f"Builder session empty response (attempt {attempt}/{LLM_MAX_RETRIES})")
+                time.sleep(5)
+                continue
+
+            updated_messages = session_messages + [
+                {"role": "assistant", "content": raw}
+            ]
+            return raw, updated_messages
+
+        except Exception as e:
+            last_exc = e
+            err_name = type(e).__name__.lower()
+            err_str = str(e).lower()
+            is_timeout = any(
+                kw in err_name or kw in err_str
+                for kw in ("timeout", "readtimeout", "timed out")
+            )
+            is_transient = is_timeout or any(
+                kw in err_name or kw in err_str
+                for kw in ("connection", "connect", "refused", "reset", "broken", "unavailable", "502", "503")
+            )
+            if is_transient and attempt < LLM_MAX_RETRIES:
+                wait = attempt * 10
+                log.warning(f"Builder session error (attempt {attempt}/{LLM_MAX_RETRIES}): {type(e).__name__} – wait {wait}s")
+                time.sleep(wait)
+                continue
+            raise
+    raise last_exc
+
+
 def call_with_history(
     model: str,
     messages: list[dict],

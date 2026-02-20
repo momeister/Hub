@@ -26,6 +26,7 @@ from skills.self_optimizer.git_manager import GitManager
 from skills.self_optimizer.docker_sandbox import OptimizerSandbox
 from skills.self_optimizer.approval import ApprovalManager
 from skills.self_optimizer.config import OptimizerConfig
+from skills.self_optimizer.memory_hook import record_optimization, get_optimization_context
 
 log = logging.getLogger("ai-hub.self_optimizer")
 
@@ -315,6 +316,16 @@ class OptimizationEngine:
                             message=run.last_change_description,
                         )
                         run.version_before = version
+
+                        # Optimierung in Memory schreiben
+                        record_optimization(
+                            files_changed=run.files_changed,
+                            description=run.last_change_description,
+                            tests_passed=test_result.get("success", False),
+                            decision="merge",
+                            quality_score=review.get("quality_score", 0),
+                        )
+
                         self._notify(
                             f"*Optimizer: Gemergt!*\n\n"
                             f"Version: `{version}`\n"
@@ -416,16 +427,23 @@ class OptimizationEngine:
         """Reasoning-Modell analysiert Codebase und schlaegt Verbesserung vor."""
         analysis_context = self.developer.build_codebase_summary()
 
+        # Bisherige Optimierungen als Kontext laden
+        opt_history = get_optimization_context()
+        history_block = ""
+        if opt_history:
+            history_block = f"\n\nPREVIOUS OPTIMIZATIONS (do NOT repeat these):\n{opt_history}\n"
+
         prompt = f"""You are a senior software architect analyzing a codebase for improvements.
 
 CODEBASE SUMMARY:
 {analysis_context}
-
+{history_block}
 Identify the single highest-impact improvement that can be made.
 Consider: bug fixes, performance issues, missing error handling,
 code quality, missing features, security issues, new useful experiments.
 
 IMPORTANT: Do NOT suggest changes to files in skills/self_optimizer/ (that's the optimizer itself).
+IMPORTANT: Do NOT suggest changes that have already been done (see previous optimizations above).
 
 Choose ONE of these categories:
 1. IMPROVE existing code (bugfix, refactor, performance, security)
@@ -590,3 +608,53 @@ If the codebase looks solid and no improvements are needed, output:
             files_written=run.iterations_done,
             elapsed_sec=elapsed,
         )
+
+    # ------------------------------------------------------------------
+    # History & Suggest (Memory-basiert)
+    # ------------------------------------------------------------------
+
+    def get_optimization_history(self) -> list[dict]:
+        """Bisherige Optimierungen aus MEMORY.md lesen."""
+        try:
+            from core.memory import get_memory
+            memory = get_memory()
+            return memory.get_optimization_history()
+        except Exception:
+            return []
+
+    def suggest_next_target(self) -> str:
+        """
+        Basierend auf der History den naechsten sinnvollen
+        Optimierungskandidaten vorschlagen.
+        """
+        history = self.get_optimization_history()
+
+        # Dateien sammeln die bereits optimiert wurden
+        optimized_files = set()
+        failed_files = set()
+        for entry in history:
+            f = entry.get("file", "")
+            if entry.get("tests_passed"):
+                optimized_files.add(f)
+            else:
+                failed_files.add(f)
+
+        # Codebase-Dateien lesen
+        try:
+            all_files = self.developer.get_project_files() if self.developer else []
+        except Exception:
+            all_files = []
+
+        # Dateien die noch nicht optimiert wurden bevorzugen
+        candidates = [f for f in all_files if f not in optimized_files]
+        # Fehlgeschlagene mit neuem Ansatz versuchen
+        retry_candidates = [f for f in failed_files if f in all_files]
+
+        if candidates:
+            suggestion = f"Optimize {candidates[0]} — not yet analyzed"
+        elif retry_candidates:
+            suggestion = f"Retry optimization of {retry_candidates[0]} with different approach"
+        else:
+            suggestion = "All known files already optimized. Run auto-mode for deeper analysis."
+
+        return suggestion

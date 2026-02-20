@@ -733,11 +733,12 @@ def _get_queue_status(prompt_id: str) -> str:
 
 def _wait_for_result(
     prompt_id: str,
-    timeout: int = 600,
+    timeout: int = 1800,
     progress_callback=None,
 ) -> dict:
     """
     Poll ComfyUI history until job completes. Returns history entry.
+    Default timeout 1800s (30 min) to allow for large video generation.
     Progress callback fires at 25%, 50%, 75% only (reduces Telegram spam).
     """
     deadline = time.time() + timeout
@@ -932,7 +933,7 @@ def run(
         }
 
     try:
-        history = _wait_for_result(prompt_id, timeout=600, progress_callback=progress_callback)
+        history = _wait_for_result(prompt_id, timeout=1800, progress_callback=progress_callback)
     except TimeoutError as e:
         return {
             "success": False,

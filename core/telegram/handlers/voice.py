@@ -335,12 +335,16 @@ async def handle_voice_wizard_text(update: Update, chat_id: int, text: str, sess
 
 async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str, session: dict):
     chat_id = update.effective_chat.id
+    # Callback queries nutzen update.callback_query.message, nicht update.message
+    q = update.callback_query
+    message = q.message if q else update.message
+
     if data == "voice_generate":
         session["flow"] = "voice"
         session["awaiting"] = "voice_generate_text"
         tg_state.user_sessions[chat_id] = session
         prefs = tg_state.voice_prefs.get(chat_id, {})
-        await update.message.reply_text(
+        await message.reply_text(
             "*Generate Voice*\n\n"
             f"Profile: `{prefs.get('profile_name', 'default')}`\n"
             f"Language: `{prefs.get('language', 'en')}`\n\n"
@@ -357,7 +361,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         session["flow"] = "voice"
         session["awaiting"] = "voice_profile_name"
         tg_state.user_sessions[chat_id] = session
-        await update.message.reply_text(
+        await message.reply_text(
             "*Create Voice Profile*\n\nEnter a name for the new profile:",
             parse_mode="Markdown",
         )
@@ -371,13 +375,13 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
             session["flow"] = "voice"
             session["awaiting"] = "voice_profile_select"
             tg_state.user_sessions[chat_id] = session
-            await update.message.reply_text(
+            await message.reply_text(
                 "*Select Voice Profile for TTS:*",
                 parse_mode="Markdown",
                 reply_markup=kb_voice_profiles_select(profiles),
             )
         except Exception as exc:
-            await update.message.reply_text(f"Error loading profiles: {exc}")
+            await message.reply_text(f"Error loading profiles: {exc}")
         return True
 
     if data == "voice_delete":
@@ -388,17 +392,17 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
             session["flow"] = "voice"
             session["awaiting"] = "voice_profile_delete"
             tg_state.user_sessions[chat_id] = session
-            await update.message.reply_text(
+            await message.reply_text(
                 "*Delete Voice Profile:*\nSelect profile to delete:",
                 parse_mode="Markdown",
                 reply_markup=kb_voice_profiles_select(profiles),
             )
         except Exception as exc:
-            await update.message.reply_text(f"Error loading profiles: {exc}")
+            await message.reply_text(f"Error loading profiles: {exc}")
         return True
 
     if data == "voice_lang":
-        await update.message.reply_text(
+        await message.reply_text(
             "*Select TTS Language:*",
             parse_mode="Markdown",
             reply_markup=kb_voice_language(),
@@ -411,7 +415,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "voice_cancel":
         tg_state.user_sessions.pop(chat_id, None)
-        await update.message.reply_text("Voice operation cancelled.")
+        await message.reply_text("Voice operation cancelled.")
         return True
 
     if data.startswith("vlang_"):
@@ -419,7 +423,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if chat_id not in tg_state.voice_prefs:
             tg_state.voice_prefs[chat_id] = {}
         tg_state.voice_prefs[chat_id]["language"] = lang
-        await update.message.reply_text(
+        await message.reply_text(
             f"*TTS Language set to:* `{lang}`",
             parse_mode="Markdown",
         )
@@ -429,7 +433,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         lang = data[len("vplang_"):]
         name = session.get("profile_name", "Unnamed")
         tg_state.user_sessions.pop(chat_id, None)
-        await update.message.reply_text(f"*Creating profile:* `{name}` ({lang})...", parse_mode="Markdown")
+        await message.reply_text(f"*Creating profile:* `{name}` ({lang})...", parse_mode="Markdown")
         threading.Thread(
             target=_voice_create_profile_thread,
             args=(chat_id, name, lang),
@@ -440,7 +444,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("vprofile_"):
         pid = data[len("vprofile_"):]
         if pid == "none":
-            await update.message.reply_text("No profiles available. Create one first with /voice.")
+            await message.reply_text("No profiles available. Create one first with /voice.")
             tg_state.user_sessions.pop(chat_id, None)
             return True
 
@@ -452,7 +456,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
             tg_state.voice_prefs[chat_id]["profile_id"] = pid
             tg_state.voice_prefs[chat_id]["profile_name"] = pid
             tg_state.user_sessions.pop(chat_id, None)
-            await update.message.reply_text(
+            await message.reply_text(
                 f"*Voice profile selected:* `{pid}`\n"
                 "All TTS will use this profile.",
                 parse_mode="Markdown",
@@ -462,7 +466,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if awaiting == "voice_profile_delete":
             session["delete_profile_id"] = pid
             tg_state.user_sessions[chat_id] = session
-            await update.message.reply_text(
+            await message.reply_text(
                 f"*Really delete profile* `{pid}`?",
                 parse_mode="Markdown",
                 reply_markup=kb_voice_delete_confirm(pid, pid),
@@ -480,7 +484,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return True
 
     if data == "vsample_more":
-        await update.message.reply_text("Send another voice message as sample.")
+        await message.reply_text("Send another voice message as sample.")
         return True
 
     if data == "vsample_done":
@@ -494,7 +498,7 @@ async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         tg_state.voice_prefs[chat_id]["profile_id"] = profile_id
         tg_state.voice_prefs[chat_id]["profile_name"] = profile_name
 
-        await update.message.reply_text(
+        await message.reply_text(
             "*Profile complete!*\n\n"
             f"Name    : `{profile_name}`\n"
             f"Samples : {count}\n"

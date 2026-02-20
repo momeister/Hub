@@ -199,6 +199,17 @@ def dispatch(user_message: str, chat_history: list[dict] = None) -> dict:
         )
         history_ctx = f"\nRecent context:\n{history_ctx}\n"
 
+    # Memory-Kontext einfuegen
+    memory_ctx = ""
+    try:
+        from core.memory import get_memory
+        memory = get_memory()
+        ctx = memory.get_context_for_llm()
+        if ctx:
+            memory_ctx = f"\nMemory context:\n{ctx}\n"
+    except Exception:
+        pass
+
     system_prompt = (
         "You are a smart dispatcher. Analyze the user's message and call the "
         "MOST appropriate tool/skill. "
@@ -213,6 +224,7 @@ def dispatch(user_message: str, chat_history: list[dict] = None) -> dict:
 
     prompt = (
         f"{history_ctx}"
+        f"{memory_ctx}"
         f"User message: {user_message}\n\n"
         f"Call the appropriate tool."
     )

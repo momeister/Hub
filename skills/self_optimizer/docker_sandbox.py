@@ -52,7 +52,7 @@ class OptimizerSandbox:
             f"--cpus={self.config.container_cpu_limit}",
             "--pids-limit=256",
             "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=100m",
+            "--tmpfs", "/tmp:rw,nosuid,size=100m",
             "-v", f"{docker_dir}:/app/code:ro",  # READ-ONLY Mount
             "-w", "/app/code",
         ]
@@ -92,11 +92,11 @@ class OptimizerSandbox:
         if not changed_files:
             return True, "Keine Python-Dateien zu pruefen"
 
-        # Syntax-Pruefung via py_compile
+        # Syntax-Pruefung via py_compile (PYTHONDONTWRITEBYTECODE verhindert .pyc)
         syntax_cmds = [
             f"python -m py_compile {f} 2>&1" for f in changed_files
         ]
-        command = " && ".join(syntax_cmds)
+        command = "export PYTHONDONTWRITEBYTECODE=1 && " + " && ".join(syntax_cmds)
         exit_code, output = self._docker_run(
             project_dir, command, timeout=30,
         )

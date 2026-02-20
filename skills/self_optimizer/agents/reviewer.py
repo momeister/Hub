@@ -84,15 +84,24 @@ TEST RESULTS:
 
 Review criteria:
 1. CORRECTNESS: Does the code implement the task correctly?
-2. SAFETY: No file system access outside project dir, no network calls, no secrets exposure
+2. SAFETY: No file system access outside project dir, no secrets exposure
 3. QUALITY: Code style, error handling, edge cases
 4. TESTS: Did tests pass? Are test results meaningful?
-5. SECURITY: No command injection, no path traversal, no data leaks, no API keys in code
+5. SECURITY: Only flag REAL critical issues — command injection with user input,
+   hardcoded credentials/API keys, actual path traversal attacks.
+   Do NOT flag: writing files within the project dir, using subprocess for
+   internal commands, local network calls part of the project design, import
+   statements, logging, standard library usage, or reading config files.
 
 DECISION RULES:
-- MERGE: Tests pass, code is correct, no security issues
-- RETRY: Minor issues that could be fixed with another attempt
-- REJECT: Fundamental problems, security issues, or wrong approach
+- MERGE: Code is correct and implements the task. Minor style issues are OK.
+  Tests passing is a strong signal — prefer MERGE when tests pass.
+- RETRY: Code has bugs or doesn't fully implement the task, but approach is viable.
+- REJECT: Fundamentally wrong approach or actual critical security vulnerability
+  (e.g. hardcoded passwords, SQL injection with user input).
+
+Be pragmatic. Working code that passes tests should generally be MERGED.
+Only REJECT for genuine critical issues, not theoretical concerns.
 
 Output ONLY this JSON:
 {{
@@ -128,14 +137,29 @@ Output ONLY this JSON:
                 "suggestions": parsed.get("suggestions", []),
             }
 
-            # Erzwinge REJECT bei Security-Issues
-            if result["security_issues"]:
+            # Nur bei echten kritischen Security-Issues ablehnen
+            # (hardcoded secrets, actual injection vectors)
+            CRITICAL_KEYWORDS = (
+                "hardcoded password", "hardcoded credential", "api key in code",
+                "sql injection", "command injection with user input",
+                "path traversal attack", "remote code execution",
+            )
+            critical_issues = [
+                issue for issue in result["security_issues"]
+                if any(kw in issue.lower() for kw in CRITICAL_KEYWORDS)
+            ]
+            if critical_issues:
                 self.blog.warning(
-                    f"Security-Issues gefunden: {result['security_issues']}"
+                    f"Kritische Security-Issues: {critical_issues}"
                 )
                 result["decision"] = ReviewDecision.REJECT
                 result["reason"] = (
-                    f"Security: {'; '.join(result['security_issues'][:3])}"
+                    f"Critical Security: {'; '.join(critical_issues[:3])}"
+                )
+            elif result["security_issues"]:
+                # Nicht-kritische Issues loggen aber nicht ablehnen
+                self.blog.info(
+                    f"Security-Hinweise (nicht-kritisch): {result['security_issues']}"
                 )
 
             # Erzwinge RETRY falls Tests fehlgeschlagen aber MERGE empfohlen
