@@ -46,7 +46,11 @@ def _read_project_files(project_dir: str, max_file_size: int = 50_000) -> dict[s
     base = Path(project_dir)
 
     for fpath in sorted(base.rglob("*")):
-        if not fpath.is_file():
+        try:
+            if not fpath.is_file():
+                continue
+        except OSError:
+            # Skip broken symlinks (e.g. .venv/lib64 from Linux Docker)
             continue
 
         parts = fpath.relative_to(base).parts
@@ -95,8 +99,25 @@ def list_projects(output_base: str) -> list[dict]:
     for d in sorted(base.iterdir()):
         if not d.is_dir() or d.name.startswith(("_", ".")):
             continue
-        all_files = [f for f in d.rglob("*") if f.is_file()]
-        total_size = sum(f.stat().st_size for f in all_files if f.exists())
+        all_files = []
+        for f in d.rglob("*"):
+            # Skip problematic directories (.venv has Linux symlinks like lib64
+            # that cause [WinError 1920] on Windows)
+            parts = f.relative_to(d).parts
+            if any(p in _SKIP_DIRS or p.startswith(".") for p in parts[:-1]):
+                continue
+            try:
+                if f.is_file():
+                    all_files.append(f)
+            except OSError:
+                # Skip broken symlinks (e.g. .venv/lib64 from Linux)
+                continue
+        total_size = 0
+        for f in all_files:
+            try:
+                total_size += f.stat().st_size
+            except OSError:
+                continue
 
         exts = {}
         for f in all_files:

@@ -29,6 +29,9 @@ def generate_all_skeletons(blueprint: dict, coder_model: str) -> dict:
     if deps.get("content"):
         dep_info = f"\nDEPENDENCIES ({deps.get('type', '')}):\n{deps['content']}\n"
 
+    # Extract the project goal for context
+    goal = blueprint.get("project_name", "").replace("_", " ")
+
     prompt = f"""Generate SKELETONS (signatures only, NO implementations) for ALL files in this {language} project.
 
 PROJECT: "{blueprint.get('project_name', '')}"
@@ -64,7 +67,13 @@ RULES (CRITICAL):
      - Do NOT pin exact versions (no ==1.2.3)
      - Use loose version constraints (>=1.0 or just the package name)
      - Only include packages that ACTUALLY EXIST on PyPI/npm/crates.io
-     - Prefer well-known, popular packages"""
+     - Prefer well-known, popular packages
+  10. EVERY feature from the project goal MUST have corresponding function signatures.
+      If the goal mentions "move history", there MUST be functions for recording/displaying moves.
+      If the goal mentions "bot/AI", there MUST be functions for AI move selection.
+      If the goal mentions "UI", there MUST be event handlers for user interaction (click, drag, input).
+  11. For Python web apps (FastAPI/Flask), the entry point MUST include:
+      if __name__ == "__main__": with uvicorn.run() or app.run()"""
 
     system = f"Expert {language} architect. Output ONLY skeletons, no implementations."
 
@@ -93,8 +102,14 @@ def fill_in_file(
     path = file_spec["path"]
     purpose = file_spec.get("purpose", "")
     language = blueprint["language"]
+    project_goal = blueprint.get("project_name", "").replace("_", " ")
 
     ctx_parts = []
+
+    # Include the overall project goal so the coder understands the full picture
+    goal_text = blueprint.get("_goal", "")
+    if goal_text:
+        ctx_parts.append(f"=== PROJECT GOAL ===\n{goal_text}\n")
 
     if written_files:
         ctx_parts.append("=== ALREADY IMPLEMENTED FILES (full code) ===")
@@ -127,6 +142,23 @@ def fill_in_file(
         max_chars = int(max_ctx_tokens * 3.5)
         context = context[:max_chars]
 
+    # Detect if this is a Python entry point that uses a web framework
+    is_python_entry = (
+        language == "python"
+        and any(path.endswith(ep) for ep in ["main.py", "app.py", "server.py", "run.py"])
+    )
+    entry_point_rule = ""
+    if is_python_entry:
+        entry_point_rule = """
+  6. CRITICAL: If this file creates a FastAPI/Flask/Starlette/web app, it MUST end with:
+     if __name__ == "__main__":
+         import uvicorn
+         uvicorn.run(app, host="127.0.0.1", port=8000)
+     This ensures the file can be run directly with 'python main.py'.
+  7. CRITICAL: ALL features described in the project goal MUST be fully implemented.
+     Do NOT leave placeholder functions or TODO comments. Every endpoint, every game
+     mechanic, every UI element mentioned in the goal must work."""
+
     prompt = f"""Implement the file: {path}
 
 Purpose: {purpose}
@@ -141,7 +173,7 @@ RULES:
   2. Full implementation, no placeholders
   3. Follow language idioms
   4. Handle errors properly
-  5. Add brief comments for complex logic"""
+  5. Add brief comments for complex logic{entry_point_rule}"""
 
     system = f"Expert {language} developer. Output ONLY code, no markdown fences."
 

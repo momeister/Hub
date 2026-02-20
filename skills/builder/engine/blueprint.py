@@ -112,8 +112,22 @@ Your blueprint must include:
 3. Dependency versions
 4. Architecture decisions with reasoning
 
+FEATURE COMPLETENESS (CRITICAL):
+  - Read the project requirement CAREFULLY word by word
+  - Extract EVERY feature mentioned (explicit or implied)
+  - EACH feature MUST have corresponding files and logic in the blueprint
+  - Example: "chess game with move history and bot" requires:
+    * Chess board rendering with interactive piece movement (click/drag)
+    * Full chess rules enforcement (legal moves, check, checkmate, castling, en passant)
+    * Move history display (list of moves in standard notation)
+    * AI bot opponent (at minimum: random legal moves; ideally: basic evaluation)
+    * Game state management (whose turn, game over detection)
+  - If the user asks for a UI, it MUST be interactive (clickable, draggable, responsive)
+  - If the user asks for a "game", pieces/elements MUST be movable/interactive
+  - NEVER create a static/display-only UI when interaction is requested or implied
+
 LANGUAGE SELECTION GUIDE (choose objectively, NO bias):
-  - **Games (snake, tetris, pong, etc.)**:
+  - **Games (snake, tetris, pong, chess, etc.)**:
     - Web-based (browser): HTML + JavaScript + Canvas (simple, runs everywhere)
     - Desktop GUI: rust (macroquad), c++ (SDL), c# (MonoGame)
     - CLI terminal games: python (curses), c++, go
@@ -134,6 +148,8 @@ ANTI-PATTERNS - DO NOT:
   - Use niche build tools or package managers
   - Over-engineer: a simple project needs a simple stack (e.g. HTML+JS, not React+TypeScript+Tailwind+Redux)
   - Mix multiple paradigms or frameworks unnecessarily
+  - Create placeholder/stub files — every file must have a clear, implementable purpose
+  - Omit features that the user explicitly requested
 
 WHEN IN DOUBT: choose the MOST COMMON, MOST POPULAR option for the domain.
   Examples: Python for scripts/CLI, HTML+JS for browser apps, Go or Python for web APIs,
@@ -148,6 +164,8 @@ RULES:
   6. Use ONLY well-known, maintained, popular libraries - no obscure crates/packages
   7. List ALL files in dependency order (base files first)
   8. Keep the stack MINIMAL - fewer dependencies = fewer problems
+  9. Each file's "purpose" must be specific and actionable, NOT vague
+  10. For Python web backends, the entry point MUST include uvicorn/flask startup code
 
 OUTPUT: A single JSON object with this exact schema:
 """ + """{

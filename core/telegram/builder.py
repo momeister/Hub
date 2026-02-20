@@ -343,12 +343,12 @@ def run_builder(chat_id: int, answers: dict) -> None:
 
         # Always send a final completion message to Telegram
         if proc.returncode == 0:
-            file_list = "\n".join(f"  `{f}`" for f in files_written[-25:]) if files_written else "  --"
+            file_list = "\n".join(f"  `{_esc(f)}`" for f in files_written[-25:]) if files_written else "  --"
             err_section = ""
             if errors_found:
                 err_section = (
                     f"\n\n*Warnings ({len(errors_found)}):*\n"
-                    + "\n".join(f"  {e[:80]}" for e in errors_found[:5])
+                    + "\n".join(f"  {_esc(e[:80])}" for e in errors_found[:5])
                 )
             out_dir = tg_state.build_state.get("output_dir", "output/")
             send_telegram(
@@ -358,12 +358,12 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 f"Language : {tg_state.build_state['language'] or '?'}\n"
                 f"Output   : `{_esc(out_dir)}`\n\n"
                 f"*Generated Files:*\n{file_list}{err_section}\n\n"
-                f"_Use /run to execute the project_\n"
-                f"_Or open project\\_start.bat in the output folder_"
+                f"Use /run to execute the project\n"
+                f"Or open project\\_start.bat in the output folder"
             )
         else:
             err_list = (
-                "\n".join(f"  `{e[:100]}`" for e in errors_found[:8]) if errors_found else "  --"
+                "\n".join(f"  `{_esc(e[:100])}`" for e in errors_found[:8]) if errors_found else "  --"
             )
             send_telegram(
                 f"*Build fehlgeschlagen* (exit {proc.returncode})\n\n"
@@ -371,7 +371,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 f"Phase    : {_esc(tg_state.build_state.get('detailed_phase', '')[:80])}\n"
                 f"Files    : {tg_state.build_state['files_done']}/{tg_state.build_state['files_total']}\n\n"
                 f"*Errors:*\n{err_list}\n\n"
-                f"`/status` for system info"
+                f"/status for system info"
             )
     except Exception as exc:
         err(f"Builder error: {exc}")

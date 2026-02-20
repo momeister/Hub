@@ -18,11 +18,18 @@ def generate_readme(
     output_dir: str,
     manager_model: str,
     coder_model: str,
+    parent_goal: str = "",
 ) -> str:
-    """Generate comprehensive README."""
+    """Generate comprehensive README.
+    
+    Args:
+        parent_goal: If this is a subproject, the overall project goal for context.
+    """
     language = blueprint["language"]
     framework = blueprint.get("framework", "")
     why = blueprint.get("why", "Optimal for this use case")
+    project_name = blueprint.get("project_name", os.path.basename(output_dir))
+    is_subproject = bool(parent_goal)
 
     # Detect actual entry point for Python
     python_entry = "main.py"
@@ -39,7 +46,7 @@ def generate_readme(
                     break
 
     start_instructions = {
-        "python": f"```bash\npython -m venv .venv\n.venv\\Scripts\\activate  # Windows\npip install -r requirements.txt\npython {python_entry}\n```",
+        "python": f"""```bash\npython -m venv .venv\n# Windows:\n.venv\\Scripts\\activate\n# Linux/Mac:\n# source .venv/bin/activate\npip install -r requirements.txt\npython {python_entry}\n```""",
         "rust": "```bash\ncargo build\ncargo run\n```",
         "go": "```bash\ngo mod tidy\ngo run .\n```",
         "typescript": "```bash\nnpm install\nnpm run dev\n```",
@@ -58,10 +65,15 @@ def generate_readme(
         arch_lines = "\n".join(f"- **{d['decision']}**: {d['reasoning']}" for d in decisions)
         arch_section = f"\n## Architecture Decisions\n\n{arch_lines}\n"
 
+    # Subproject context note
+    subproject_note = ""
+    if is_subproject:
+        subproject_note = f"\n> Part of: {parent_goal[:100]}\n"
+
     readme = f"""# {goal.split('.')[0].strip() if '.' in goal else goal[:80]}
 
 > Built by AI Builder v3
-
+{subproject_note}
 ## Tech Stack
 
 **Language:** {language.title()}
@@ -95,29 +107,49 @@ Built with AI Builder v3
 
 
 def generate_multi_language_readme(goal: str, subprojects: list[dict], output_dir: str) -> str:
-    """Generate README for multi-language projects."""
+    """Generate README for multi-language projects.
+    
+    This generates a master README that is consistent with the sub-project READMEs.
+    Uses the same start instructions format as sub-project READMEs and project_start.bat.
+    """
     sub_instructions = []
     for i, sub in enumerate(subprojects, 1):
         name = sub["name"]
         lang = sub["language"]
+        fw = sub.get("framework", "")
         path = sub.get("path", name)
 
-        cmds = {
-            "rust": f"cd {path} && cargo run",
-            "typescript": f"cd {path} && npm install && npm run dev",
-            "javascript": f"cd {path} && npm install && npm start",
-            "go": f"cd {path} && go run .",
-            "python": f"cd {path} && pip install -r requirements.txt && python main.py",
-        }
-        cmd = cmds.get(lang, f"cd {path} && <start command>")
+        # Use consistent instructions matching sub-project READMEs
+        if lang == "python":
+            cmds = (
+                f"cd {path}\n"
+                f"python -m venv .venv\n"
+                f"# Windows:\n"
+                f".venv\\Scripts\\activate\n"
+                f"# Linux/Mac:\n"
+                f"# source .venv/bin/activate\n"
+                f"pip install -r requirements.txt\n"
+                f"python main.py"
+            )
+        elif lang == "typescript":
+            cmds = f"cd {path}\nnpm install\nnpm run dev"
+        elif lang == "javascript":
+            cmds = f"cd {path}\nnpm install\nnpm start"
+        elif lang == "rust":
+            cmds = f"cd {path}\ncargo run"
+        elif lang == "go":
+            cmds = f"cd {path}\ngo run ."
+        else:
+            cmds = f"cd {path}\n# See {path}/README.md for instructions"
 
+        fw_note = f" + {fw}" if fw else ""
         sub_instructions.append(
-            f"**Terminal {i} - {name.title()} ({lang.title()}):**\n```bash\n{cmd}\n```"
+            f"**Terminal {i} - {name.title()} ({lang.title()}{fw_note}):**\n```bash\n{cmds}\n```"
         )
 
     instructions = "\n\n".join(sub_instructions)
     sub_list = "\n".join(
-        f"- **{sub['name'].title()}**: {sub['language'].title()} ({sub.get('framework', 'N/A')})"
+        f"- **{sub['name'].title()}**: {sub['language'].title()} ({sub.get('framework', 'N/A')}) — see [{sub['name']}/README.md]({sub['name']}/README.md)"
         for sub in subprojects
     )
 

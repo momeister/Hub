@@ -10,6 +10,7 @@ Each agent runs one at a time (sequential model loading for VRAM efficiency).
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from skills.builder.engine.artifacts import (
     generate_project_start_bat,
 )
 from skills.builder.engine.blueprint import architect_phase
-from skills.builder.engine.context import blog, DEFAULT_CTX_TOKENS
+from skills.builder.engine.context import blog, DEFAULT_CTX_TOKENS, IN_DOCKER
 from skills.builder.engine.critic import critic_review_blueprint
 
 # File-based approval signal -- shared Docker volume
@@ -38,6 +39,26 @@ def _cleanup_approval_signal():
             os.remove(_APPROVAL_SIGNAL)
     except OSError:
         pass
+
+
+def _cleanup_docker_venvs(output_dir: str) -> None:
+    """Remove .venv directories created inside Docker.
+
+    When the builder runs in Docker (Linux) but the output is mounted from
+    a Windows host, the .venv contains Linux symlinks (lib64 -> lib) that
+    cause [WinError 1920] on Windows.  The project_start.bat creates a
+    fresh, Windows-native .venv when the user runs the project.
+    """
+    if not IN_DOCKER:
+        return  # Only clean up when running in Docker
+
+    for venv_dir in Path(output_dir).rglob(".venv"):
+        if venv_dir.is_dir():
+            try:
+                shutil.rmtree(str(venv_dir))
+                blog.info(f"Cleaned up Docker .venv: {venv_dir.relative_to(output_dir)}")
+            except Exception as exc:
+                blog.warning(f"Could not remove .venv {venv_dir}: {exc}")
 
 
 def _wait_for_approval(timeout: int = 7200) -> str:
@@ -67,9 +88,12 @@ def build_single_language_project(
     coder_model: str,
     output_dir: str,
     ctx_tokens: int,
+    parent_goal: str = "",
 ) -> dict:
     """Build a single-language project using the 5-agent pipeline."""
     language = blueprint["language"]
+    # Ensure the goal is accessible to coder agents via the blueprint
+    blueprint.setdefault("_goal", goal)
 
     blog.info(f"Language: {language}")
     blog.info("Mode: AGENT PIPELINE (Planner->Retriever->Coder->Executor->Critic)")
@@ -108,7 +132,7 @@ def build_single_language_project(
 
     files = ws["written_files"]
 
-    generate_readme(goal, blueprint, files, output_dir, manager_model, coder_model)
+    generate_readme(goal, blueprint, files, output_dir, manager_model, coder_model, parent_goal=parent_goal)
     generate_project_start_bat(blueprint, output_dir, files)
 
     return files
@@ -235,12 +259,16 @@ def build_project(
                 coder_model=coder_model,
                 output_dir=sub_dir,
                 ctx_tokens=ctx_tokens,
+                parent_goal=goal,
             )
 
         generate_multi_language_readme(goal, subprojects, output_dir)
         generate_project_start_bat(blueprint, output_dir, {}, subprojects=subprojects)
     else:
         build_single_language_project(goal, blueprint, manager_model, coder_model, output_dir, ctx_tokens)
+
+    # Clean up Docker-created .venv directories (Linux symlinks break on Windows)
+    _cleanup_docker_venvs(output_dir)
 
     elapsed = int(time.time() - start_time)
     blog.complete(

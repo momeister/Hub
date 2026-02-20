@@ -34,6 +34,82 @@ from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file
 
 
 # ---------------------------------------------------------------------------
+# Helper: ensure Python entry points are runnable
+# ---------------------------------------------------------------------------
+def _ensure_python_entry_points(output_dir: str, written_files: dict) -> None:
+    """Ensure Python entry point files (main.py, app.py, server.py) have
+    if __name__ == '__main__' blocks so they can be run with 'python main.py'.
+
+    For FastAPI/Flask/Starlette apps: adds uvicorn.run() block.
+    For plain scripts: no change needed (they run inline).
+    """
+    entry_candidates = ["main.py", "app.py", "server.py", "run.py"]
+
+    for entry in entry_candidates:
+        fpath = os.path.join(output_dir, entry)
+        if not os.path.exists(fpath):
+            continue
+
+        try:
+            content = open(fpath, "r", encoding="utf-8").read()
+        except Exception:
+            continue
+
+        # Check if the file uses a web framework
+        uses_fastapi = "FastAPI" in content or "from fastapi" in content
+        uses_flask = "Flask(" in content or "from flask" in content
+        uses_starlette = "Starlette(" in content or "from starlette" in content
+
+        has_main_block = 'if __name__' in content
+
+        if has_main_block:
+            continue  # Already has entry point
+
+        if uses_fastapi or uses_starlette:
+            # Detect app variable name
+            app_var = "app"
+            for line in content.splitlines():
+                if "FastAPI(" in line or "Starlette(" in line:
+                    parts = line.split("=")
+                    if len(parts) >= 2:
+                        app_var = parts[0].strip()
+                    break
+
+            block = (
+                f"\n\nif __name__ == \"__main__\":\n"
+                f"    import uvicorn\n"
+                f"    uvicorn.run({app_var}, host=\"127.0.0.1\", port=8000)\n"
+            )
+            content += block
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+            if entry in written_files:
+                written_files[entry] = content
+            blog.info(f"Added uvicorn entry point to {entry}")
+
+        elif uses_flask:
+            # Detect app variable name
+            app_var = "app"
+            for line in content.splitlines():
+                if "Flask(" in line:
+                    parts = line.split("=")
+                    if len(parts) >= 2:
+                        app_var = parts[0].strip()
+                    break
+
+            block = (
+                f"\n\nif __name__ == \"__main__\":\n"
+                f"    {app_var}.run(host=\"127.0.0.1\", port=8000, debug=True)\n"
+            )
+            content += block
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+            if entry in written_files:
+                written_files[entry] = content
+            blog.info(f"Added Flask entry point to {entry}")
+
+
+# ---------------------------------------------------------------------------
 # Workspace: shared state passed between agents
 # ---------------------------------------------------------------------------
 def make_workspace(
@@ -74,6 +150,8 @@ def agent_planner(ws: dict) -> dict:
     ws["phase"] = "planner"
 
     blueprint = architect_phase(ws["goal"], ws["manager_model"])
+    # Store the goal in the blueprint so coder agents have access to it
+    blueprint["_goal"] = ws["goal"]
 
     # Critic review of blueprint (still using manager model while loaded)
     blog.phase("planner_review", "Planner reviewing own blueprint", model=ws["manager_model"])
@@ -105,6 +183,14 @@ Review for these issues ONLY:
 3. EXCESS FILES: Too many files for a simple project?
 4. DEP ORDER: Will the build order cause import failures?
 5. GOAL MISMATCH: Does the file plan actually implement what was asked?
+6. MISSING FEATURES: Go through EVERY feature/requirement in the goal word by word.
+   Does each requested feature have a corresponding file or function?
+   Examples of commonly missed features:
+   - "move history" -> needs a component/function to track and display moves
+   - "bot/AI opponent" -> needs AI logic file/function
+   - "UI" -> needs interactive event handlers (not just rendering)
+   - "play against" -> needs game loop with turn management
+   If ANY requested feature has no corresponding file, add it.
 
 Output ONLY this JSON:
 """ + """{
@@ -221,6 +307,9 @@ def agent_retriever(ws: dict) -> dict:
         blueprint.setdefault("safe_stack_violations", []).extend(stack_warnings)
 
     # Set up virtual environment for Python projects
+    # NOTE: When running in Docker (Linux) but outputting to a Windows host volume,
+    # the venv would contain Linux symlinks (lib64) that don't work on Windows.
+    # We create the venv for in-Docker testing only; it gets cleaned up after build.
     if language == "python":
         blog.info("Setting up Python virtual environment for project")
         venv_python = get_venv_python(output_dir)
@@ -383,6 +472,10 @@ def agent_executor(ws: dict) -> dict:
 
     output_dir = ws["output_dir"]
     language = ws["language"]
+
+    # Ensure Python entry points have if __name__ == "__main__" block
+    if language == "python":
+        _ensure_python_entry_points(output_dir, ws.get("written_files", {}))
 
     # Final compile check
     blog.phase("final_compile", "Final compilation check")

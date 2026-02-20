@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -94,6 +95,26 @@ def send_telegram(message: str, reply_markup: dict = None) -> None:
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
                 log.debug("Telegram ✓")
+    except urllib.error.HTTPError as he:
+        if he.code == 400:
+            # Markdown parsing failed — retry without formatting
+            log.debug("Telegram Markdown rejected, retrying plain text")
+            data_plain = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message[:4096],
+            }
+            if reply_markup:
+                data_plain["reply_markup"] = json.dumps(reply_markup)
+            payload_plain = urllib.parse.urlencode(data_plain).encode()
+            try:
+                req2 = urllib.request.Request(url, data=payload_plain, method="POST")
+                with urllib.request.urlopen(req2, timeout=10) as resp2:
+                    if resp2.status == 200:
+                        log.debug("Telegram ✓ (plain)")
+            except Exception as e2:
+                log.warning(f"Telegram plain fallback: {e2}")
+        else:
+            log.warning(f"Telegram: {he}")
     except Exception as e:
         log.warning(f"Telegram: {e}")
 
