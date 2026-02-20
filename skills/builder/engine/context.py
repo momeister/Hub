@@ -52,7 +52,7 @@ IN_DOCKER = os.path.exists("/.dockerenv")
 # Internet access flag (set by user)
 USE_INTERNET = False
 
-DEFAULT_CTX_TOKENS = 131072
+DEFAULT_CTX_TOKENS = 262144
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "1800"))
 LLM_RETRIES = int(os.environ.get("LLM_RETRIES", "4"))
 

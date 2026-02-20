@@ -81,6 +81,44 @@ def compile_check_typescript(project_dir: str) -> tuple[bool, list[str]]:
     return False, result.stdout.splitlines()[:20]
 
 
+def compile_check_javascript(project_dir: str) -> tuple[bool, list[str]]:
+    """Check JavaScript files for syntax errors using ``node --check``.
+
+    Falls back to tsc if available; otherwise uses node's built-in
+    syntax checker which catches SyntaxErrors without executing code.
+    """
+    if shutil.which("tsc"):
+        return compile_check_typescript(project_dir)
+
+    node = shutil.which("node")
+    if not node:
+        return True, []
+
+    errors: list[str] = []
+    js_files = list(Path(project_dir).rglob("*.js"))
+    # Skip node_modules
+    js_files = [f for f in js_files if "node_modules" not in str(f)]
+
+    for js_file in js_files[:50]:  # cap to avoid huge projects
+        try:
+            result = subprocess.run(
+                [node, "--check", str(js_file)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=project_dir,
+            )
+            if result.returncode != 0:
+                combined = (result.stderr + result.stdout).strip()
+                rel = str(js_file.relative_to(project_dir))
+                for line in combined.splitlines()[:3]:
+                    errors.append(f"{rel}: {line}")
+        except Exception:
+            pass
+
+    return (len(errors) == 0), errors[:20]
+
+
 def compile_check_python(project_dir: str) -> tuple[bool, list[str]]:
     if not shutil.which("mypy"):
         return True, []
@@ -101,7 +139,7 @@ def compile_check(project_dir: str, language: str) -> tuple[bool, list[str]]:
         "rust": compile_check_rust,
         "go": compile_check_go,
         "typescript": compile_check_typescript,
-        "javascript": compile_check_typescript,
+        "javascript": compile_check_javascript,
         "python": compile_check_python,
     }
     checker = checkers.get(language)

@@ -101,6 +101,9 @@ def run_builder(chat_id: int, answers: dict) -> None:
         "active_model": mgr,
         "current_action": "Starting agent pipeline: Planner -> Retriever -> Coder -> Executor -> Critic",
     }
+    # Reset event log and set quiet mode by default
+    tg_state.build_events = []
+    tg_state.build_verbose = False
 
     mode_labels = {"1": "FAST", "2": "AVERAGE", "3": "GOD MODE", "4": "UNCENSORED", "5": "Custom"}
     scope_labels = {"1": "Auto", "2": "Kompakt", "3": "Voll"}
@@ -114,7 +117,14 @@ def run_builder(chat_id: int, answers: dict) -> None:
             f"Modus    : {mode_labels.get(answers.get('mode', '2'))}\n"
             f"Aenderung: _{answers.get('goal', '')[:200]}_\n"
             f"Manager  : `{mgr}`\n"
-            f"Coder    : `{cdr}`"
+            f"Coder    : `{cdr}`\n\n"
+            f"_Quiet Mode aktiv. /builder fuer Status._",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "Verbose an", "callback_data": "build_verbose_on"},
+                    {"text": "Builder Status", "callback_data": "build_status_query"},
+                ]]
+            },
         )
     else:
         send_telegram(
@@ -126,7 +136,14 @@ def run_builder(chat_id: int, answers: dict) -> None:
             f"Internet : {internet_label}\n"
             f"Auftrag  : _{answers.get('goal', '')[:200]}_\n"
             f"Manager  : `{mgr}`\n"
-            f"Coder    : `{cdr}`"
+            f"Coder    : `{cdr}`\n\n"
+            f"_Quiet Mode aktiv. /builder fuer Status._",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "Verbose an", "callback_data": "build_verbose_on"},
+                    {"text": "Builder Status", "callback_data": "build_status_query"},
+                ]]
+            },
         )
 
     stdin_data = _build_stdin(answers)
@@ -143,6 +160,13 @@ def run_builder(chat_id: int, answers: dict) -> None:
     files_written = []
     errors_found = []
     timeout_count = 0
+
+    # Helper: send only if verbose mode is on; always store event
+    def _tg_if_verbose(msg: str, **kwargs):
+        """Send Telegram message only in verbose mode, always log to build_events."""
+        tg_state.build_events.append({"msg": msg, "ts": time.time()})
+        if tg_state.build_verbose:
+            send_telegram(msg, **kwargs)
 
     try:
         proc = subprocess.Popen(
@@ -176,7 +200,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 if model:
                     tg_state.build_state["active_model"] = model
                 tg_state.build_state["current_action"] = detail
-                send_telegram(f"[PHASE] *{_esc(detail)}*" + (f"\nModel: `{model}`" if model else ""))
+                _tg_if_verbose(f"[PHASE] *{_esc(detail)}*" + (f"\nModel: `{model}`" if model else ""))
 
             elif ptype == "tech":
                 lang = parsed.get("language", "?")
@@ -188,6 +212,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
                     tech_msg += f"\nFramework: `{fw}`"
                 if why:
                     tech_msg += f"\n_{_esc(why[:200])}_"
+                # Tech stack is always sent (essential)
                 send_telegram(tech_msg)
 
             elif ptype == "plan":
@@ -195,8 +220,11 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 files = parsed.get("files", [])
                 complexity = parsed.get("complexity", "")
                 tg_state.build_state["files_total"] = total
+                # Reset file counter on each new plan (new subproject starts fresh)
+                tg_state.build_state["files_done"] = 0
                 tg_state.build_state["current_action"] = f"Planning {total} files"
                 file_list = "\n".join(f"  `{f}`" for f in files[:15])
+                # Plan is always sent (essential)
                 send_telegram(
                     f"[INFO] *Project Plan*\n"
                     f"Files: {total} | Complexity: {complexity}\n"
@@ -231,6 +259,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
                     tech_msg += "\n\n*Decisions:*\n" + "\n".join(f"  - {_esc(d)}" for d in arch_decs[:5])
                 tech_msg += "\n\n*Tech Stack und Plan genehmigen?*"
 
+                # Approval is always sent (essential)
                 send_telegram(
                     tech_msg,
                     reply_markup={
@@ -255,7 +284,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 done_display = min(tg_state.build_state['files_done'], tg_state.build_state['files_total'])
                 progress = f"{done_display}/{tg_state.build_state['files_total']}"
                 tg_state.build_state["current_action"] = f"Completed {path}"
-                send_telegram(
+                _tg_if_verbose(
                     f"[SUCCESS] {progress} -- `{path}`\n"
                     f"   {chars:,} chars" + (f" (attempt {attempt})" if attempt > 1 else "")
                 )
@@ -267,16 +296,20 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 errors_found.append(msg)
                 tg_state.build_state["errors"].append(msg)
                 tg_state.build_state["current_action"] = f"Error: {msg[:60]}"
-                if len(errors_found) <= 5:
+                # Send critical errors always (max 5), others only in verbose
+                if severity in ("fatal", "sandbox") and len(errors_found) <= 5:
                     file_info = f"\nFile: `{file}`" if file else ""
                     send_telegram(f"[ERROR] [{severity}] `{msg[:300]}`{file_info}")
+                else:
+                    file_info = f"\nFile: `{file}`" if file else ""
+                    _tg_if_verbose(f"[ERROR] [{severity}] `{msg[:300]}`{file_info}")
 
             elif ptype == "repair":
                 file = parsed.get("file", "")
                 attempt = parsed.get("attempt", 1)
                 max_a = parsed.get("max_attempts", 3)
                 tg_state.build_state["current_action"] = f"Repairing {file} ({attempt}/{max_a})"
-                send_telegram(f"[INFO] *Repair* `{file}` ({attempt}/{max_a})")
+                _tg_if_verbose(f"[INFO] *Repair* `{file}` ({attempt}/{max_a})")
 
             elif ptype == "verify":
                 tool = parsed.get("tool", "")
@@ -284,13 +317,14 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 msg = parsed.get("message", "")
                 marker = "SUCCESS" if success else "ERROR"
                 tg_state.build_state["current_action"] = f"{tool}: {'passed' if success else 'failed'}"
-                send_telegram(f"[{marker}] *{_esc(tool)}*" + (f" -- {_esc(msg)}" if msg else ""))
+                _tg_if_verbose(f"[{marker}] *{_esc(tool)}*" + (f" -- {_esc(msg)}" if msg else ""))
 
             elif ptype == "timeout":
                 timeout_count += 1
                 file = parsed.get("file", "?")
                 model = parsed.get("model", "?")
                 tg_state.build_state["current_action"] = f"LLM Timeout (attempt {timeout_count})"
+                # Timeouts are always sent (they indicate long waits)
                 send_telegram(
                     f"[ERROR] *LLM Timeout* (#{timeout_count})\n"
                     f"File: `{file}` | Model: `{model}`\n"
@@ -304,7 +338,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 pprio = parsed.get("priority", 1)
                 tg_state.build_state["current_action"] = f"Polish: {pwhat[:40]}"
                 why_str = f"\n_{_esc(pwhy[:150])}_" if pwhy else ""
-                send_telegram(
+                _tg_if_verbose(
                     f"[INFO] *UX Polish Vorschlag* (#{pprio})\n"
                     f"`{pfile}`\n"
                     f"{_esc(pwhat)}{why_str}"
@@ -315,7 +349,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 pwhat = parsed.get("what", "?")
                 pchars = parsed.get("chars", 0)
                 tg_state.build_state["current_action"] = f"Applied polish: {pfile}"
-                send_telegram(
+                _tg_if_verbose(
                     f"[SUCCESS] *UX Polish angewendet*\n"
                     f"`{pfile}` -- {_esc(pwhat)}\n"
                     f"   {pchars:,} chars"

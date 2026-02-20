@@ -481,6 +481,39 @@ def agent_coder(ws: dict) -> dict:
         for e in errors[:3]:
             blog.error(e, file=file_path, severity="compile")
 
+        # Detect structural errors that can't be fixed by code repair
+        structural_error = False
+        for e in errors:
+            e_lower = e.lower()
+            if "duplicate module" in e_lower or "duplicate entry" in e_lower:
+                structural_error = True
+                # Find and remove the duplicate file
+                import re as _re
+                dup_match = _re.search(r'also at "([^"]+)"', e)
+                if dup_match:
+                    dup_path = dup_match.group(1)
+                    if os.path.exists(dup_path) and dup_path != full_path:
+                        try:
+                            os.remove(dup_path)
+                            blog.info(f"Removed duplicate module: {dup_path}")
+                            # Also clean up empty parent dirs
+                            dup_parent = os.path.dirname(dup_path)
+                            if dup_parent and os.path.isdir(dup_parent) and not os.listdir(dup_parent):
+                                os.rmdir(dup_parent)
+                        except OSError as exc:
+                            blog.warning(f"Could not remove duplicate: {exc}")
+                break
+
+        if structural_error:
+            # Re-check after removing duplicates
+            success_s, all_errors_s = compile_check(output_dir, language)
+            errors_s = [e for e in all_errors_s if file_basename in e or file_path in e]
+            if not errors_s:
+                blog.verify(True, "compile", f"{file_path} fixed by removing duplicate")
+                continue
+            # If still broken, fall through to normal repair
+            errors = errors_s
+
         max_repairs = MAX_REPAIR_ATTEMPTS.get(language, 3)
         repaired_ok = False
 
@@ -518,6 +551,90 @@ def agent_coder(ws: dict) -> dict:
             write_file(full_path, fresh_code)
             written_files[file_path] = fresh_code
             format_code(output_dir, language)
+
+    # Post-coder validation: ensure all planned files were actually generated
+    planned_paths = {f["path"] for f in files_list}
+    missing = planned_paths - set(written_files.keys())
+    if missing:
+        blog.warning(f"Missing {len(missing)} planned files after coder phase: {', '.join(sorted(missing)[:10])}")
+        for miss_path in sorted(missing):
+            miss_spec = next((f for f in files_list if f["path"] == miss_path), None)
+            if miss_spec:
+                blog.info(f"Generating missing file: {miss_path}")
+                try:
+                    code = fill_in_file(miss_spec, skeletons, written_files, blueprint, coder_model, ctx_tokens)
+                    miss_full = os.path.join(output_dir, miss_path)
+                    write_file(miss_full, code)
+                    written_files[miss_path] = code
+                    blog.file_done(miss_path, len(code))
+                except Exception as exc:
+                    blog.error(f"Failed to generate missing file {miss_path}: {exc}", severity="warning")
+
+    # ── Cross-file reference validation ──────────────────────────────────
+    # Scan ALL HTML files for <script src> and <link href> pointing to
+    # local files that don't actually exist on disk.  Generate any missing
+    # referenced files so the delivered project never has 404s.
+    import re as _re
+
+    _referenced_missing: list[str] = []
+    for fpath, content in list(written_files.items()):
+        if not fpath.endswith((".html", ".htm")):
+            continue
+        html_dir = os.path.dirname(fpath)  # relative dir of the HTML file
+
+        # Collect local script src references
+        for src in _re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', content, _re.IGNORECASE):
+            if src.startswith(("http://", "https://", "//", "data:")):
+                continue
+            ref_path = os.path.normpath(os.path.join(html_dir, src)).replace("\\", "/")
+            if ref_path not in written_files and not os.path.exists(os.path.join(output_dir, ref_path)):
+                _referenced_missing.append(ref_path)
+
+        # Collect local CSS href references
+        for href in _re.findall(r'<link[^>]+href=["\']([^"\']+\.css)["\']', content, _re.IGNORECASE):
+            if href.startswith(("http://", "https://", "//", "data:")):
+                continue
+            ref_path = os.path.normpath(os.path.join(html_dir, href)).replace("\\", "/")
+            if ref_path not in written_files and not os.path.exists(os.path.join(output_dir, ref_path)):
+                _referenced_missing.append(ref_path)
+
+    # Deduplicate
+    _referenced_missing = list(dict.fromkeys(_referenced_missing))
+
+    if _referenced_missing:
+        blog.warning(
+            f"Found {len(_referenced_missing)} file(s) referenced in HTML but missing on disk: "
+            + ", ".join(_referenced_missing[:10])
+        )
+        for ref_path in _referenced_missing:
+            blog.info(f"Generating missing referenced file: {ref_path}")
+            # Build a minimal spec for the missing file
+            ext = os.path.splitext(ref_path)[1].lower()
+            if ext in (".js", ".mjs"):
+                purpose = (
+                    f"JavaScript file referenced via <script src> in the project HTML. "
+                    f"It must contain all logic that the HTML page expects from '{ref_path}'. "
+                    f"Examine the HTML and other project files to determine what functions, "
+                    f"classes, and DOM interactions this file should provide."
+                )
+            elif ext == ".css":
+                purpose = (
+                    f"CSS stylesheet referenced via <link href> in the project HTML. "
+                    f"It must contain all styles the HTML page expects from '{ref_path}'."
+                )
+            else:
+                purpose = f"Asset file referenced in the HTML. Path: {ref_path}"
+
+            ref_spec = {"path": ref_path, "purpose": purpose}
+            try:
+                code = fill_in_file(ref_spec, skeletons, written_files, blueprint, coder_model, ctx_tokens)
+                ref_full = os.path.join(output_dir, ref_path)
+                write_file(ref_full, code)
+                written_files[ref_path] = code
+                blog.file_done(ref_path, len(code))
+                blog.info(f"Generated missing referenced file: {ref_path} ({len(code)} chars)")
+            except Exception as exc:
+                blog.error(f"Failed to generate referenced file {ref_path}: {exc}", severity="warning")
 
     ws["written_files"] = written_files
     return ws

@@ -25,16 +25,25 @@ def sandbox_test(output_dir: str, language: str) -> tuple[bool, str]:
         "html": None,
     }
 
+    # ── Always validate HTML references first (regardless of language) ──
+    # This catches missing <script src> / <link href> files even when
+    # the project also has a server component.
+    html_issues: list[str] = []
+    if _is_browser_project(output_dir):
+        html_ok, html_msg = _validate_browser_project(output_dir)
+        if not html_ok:
+            html_issues.append(html_msg)
+            blog.warning(f"Browser validation issues: {html_msg}")
+        else:
+            blog.verify(True, "browser_refs", html_msg)
+
     cmd = entry_commands.get(language)
     if not cmd:
         if _is_browser_project(output_dir):
             blog.phase("sandbox_test", f"Validating browser project ({language})")
-            ok, msg = _validate_browser_project(output_dir)
-            if ok:
-                blog.verify(True, "sandbox", msg)
-            else:
-                blog.warning(msg)
-            return ok, msg
+            if html_issues:
+                return False, html_issues[0]
+            return True, "Browser project OK"
         return True, f"No sandbox test available for {language}"
 
     blog.phase("sandbox_test", f"Testing generated project ({language})")
@@ -61,6 +70,8 @@ def sandbox_test(output_dir: str, language: str) -> tuple[bool, str]:
                 output = remaining[:2000]
 
                 if retcode == 0:
+                    if html_issues:
+                        return False, html_issues[0]
                     blog.verify(True, "sandbox", "Project ran successfully")
                     return True, output
                 blog.error(f"Sandbox exit code {retcode}", severity="sandbox")
@@ -82,6 +93,9 @@ def sandbox_test(output_dir: str, language: str) -> tuple[bool, str]:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         proc.kill()
+                    # Server started, but if HTML refs are broken the project won't work
+                    if html_issues:
+                        return False, html_issues[0]
                     return True, f"Server listening on port {new_port}"
 
                 port_check_time = time.time() + 2
@@ -94,11 +108,15 @@ def sandbox_test(output_dir: str, language: str) -> tuple[bool, str]:
         except subprocess.TimeoutExpired:
             proc.kill()
 
+        if html_issues:
+            return False, html_issues[0]
         blog.verify(True, "sandbox", "Process ran 30s without crashing (likely OK)")
         return True, "Process ran for 30s without crashing (long-running app)"
 
     except FileNotFoundError as exc:
         blog.warning(f"Sandbox: command not found: {exc}")
+        if html_issues:
+            return False, html_issues[0]
         return True, f"Cannot test: {exc}"
     except Exception as exc:
         blog.error(f"Sandbox error: {exc}", severity="sandbox")
@@ -133,47 +151,66 @@ def _test_http_port(port: int, timeout: float = 3.0) -> tuple[bool, str]:
 
 
 def _is_browser_project(output_dir: str) -> bool:
-    return os.path.exists(os.path.join(output_dir, "index.html"))
+    if os.path.exists(os.path.join(output_dir, "index.html")):
+        return True
+    # Also check common subdirs
+    for sub in ("public", "static", "www", "dist"):
+        if os.path.exists(os.path.join(output_dir, sub, "index.html")):
+            return True
+    return False
 
 
 def _validate_browser_project(output_dir: str) -> tuple[bool, str]:
-    index_path = os.path.join(output_dir, "index.html")
-    if not os.path.exists(index_path):
-        return False, "index.html not found"
+    # Find all HTML files (root + common subdirs)
+    html_files: list[str] = []
+    for root, _dirs, files in os.walk(output_dir):
+        # Skip node_modules and .venv
+        rel_root = os.path.relpath(root, output_dir)
+        if any(skip in rel_root for skip in ("node_modules", ".venv", "__pycache__")):
+            continue
+        for f in files:
+            if f.endswith((".html", ".htm")):
+                html_files.append(os.path.join(root, f))
 
-    html = read_file(index_path)
-    if not html.strip():
-        return False, "index.html is empty"
+    if not html_files:
+        return False, "No HTML files found"
 
     issues = []
-
-    if "<html" not in html.lower():
-        issues.append("Missing <html> tag")
-    if "<body" not in html.lower():
-        issues.append("Missing <body> tag")
-
     import re as _re
-    script_srcs = _re.findall(r"<script[^>]+src=[\"\']([^\"\']+)[\"\']", html, _re.IGNORECASE)
-    for src in script_srcs:
-        if src.startswith("http://") or src.startswith("https://") or src.startswith("//"):
-            continue
-        js_path = os.path.join(output_dir, src)
-        if not os.path.exists(js_path):
-            issues.append(f"Referenced script missing: {src}")
 
-    css_hrefs = _re.findall(r"<link[^>]+href=[\"\']([^\"\']+\.css)[\"\']", html, _re.IGNORECASE)
-    for href in css_hrefs:
-        if href.startswith("http://") or href.startswith("https://") or href.startswith("//"):
+    for html_path in html_files:
+        html = read_file(html_path)
+        if not html.strip():
+            issues.append(f"{os.path.relpath(html_path, output_dir)} is empty")
             continue
-        css_path = os.path.join(output_dir, href)
-        if not os.path.exists(css_path):
-            issues.append(f"Referenced stylesheet missing: {href}")
+
+        html_dir = os.path.dirname(html_path)
+        rel_html = os.path.relpath(html_path, output_dir)
+
+        # Check script references
+        script_srcs = _re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, _re.IGNORECASE)
+        for src in script_srcs:
+            if src.startswith(("http://", "https://", "//", "data:")):
+                continue
+            js_path = os.path.join(html_dir, src)
+            if not os.path.exists(js_path):
+                issues.append(f"[{rel_html}] Referenced script missing: {src}")
+
+        # Check CSS references
+        css_hrefs = _re.findall(r'<link[^>]+href=["\']([^"\']+\.css)["\']', html, _re.IGNORECASE)
+        for href in css_hrefs:
+            if href.startswith(("http://", "https://", "//", "data:")):
+                continue
+            css_path = os.path.join(html_dir, href)
+            if not os.path.exists(css_path):
+                issues.append(f"[{rel_html}] Referenced stylesheet missing: {href}")
 
     if issues:
         return False, "Browser project issues: " + "; ".join(issues)
 
     js_files = [f for f in os.listdir(output_dir) if f.endswith(".js")]
-    return True, f"Browser project OK (index.html + {len(js_files)} JS files). Open index.html to run."
+    total_html = len(html_files)
+    return True, f"Browser project OK ({total_html} HTML file(s), {len(js_files)} root JS files)"
 
 
 def _find_python_entry(output_dir: str) -> list[str]:

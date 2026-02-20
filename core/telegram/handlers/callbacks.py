@@ -260,6 +260,86 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("Kein aktiver Build zum Abbrechen.")
         return
 
+    # ── Builder verbose / quiet toggle ──
+    if data == "build_verbose_on":
+        tg_state.build_verbose = True
+        await q.message.reply_text(
+            "*Verbose Mode aktiviert* — Alle Events werden gesendet.\n"
+            "_/builder fuer Status, oder Button druecken zum Deaktivieren._",
+            parse_mode="Markdown",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "Verbose aus", "callback_data": "build_verbose_off"},
+                    {"text": "Builder Status", "callback_data": "build_status_query"},
+                ]]
+            },
+        )
+        return
+
+    if data == "build_verbose_off":
+        tg_state.build_verbose = False
+        await q.message.reply_text(
+            "*Quiet Mode aktiviert* — Nur wichtige Events.\n"
+            "_/builder fuer detaillierten Status._",
+            parse_mode="Markdown",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "Verbose an", "callback_data": "build_verbose_on"},
+                    {"text": "Builder Status", "callback_data": "build_status_query"},
+                ]]
+            },
+        )
+        return
+
+    if data == "build_status_query":
+        if not tg_state.active_build:
+            await q.message.reply_text("Kein Build aktiv.")
+            return
+        import time as _time
+        el = int(_time.time() - (tg_state.build_state.get("started_at") or _time.time()))
+        m2, s2 = divmod(el, 60)
+        capped = min(tg_state.build_state["files_done"], tg_state.build_state["files_total"])
+        total = tg_state.build_state["files_total"]
+        if total > 0:
+            pct = int((capped / total) * 100)
+            bar_len = 15
+            filled = int((pct / 100) * bar_len)
+            progress = f"[{'=' * filled}{'-' * (bar_len - filled)}] {pct}%"
+        else:
+            progress = f"{capped} files"
+        err_txt = ""
+        errs = tg_state.build_state.get("errors", [])
+        if errs:
+            err_txt = f"\n\n*Errors ({len(errs)}):*\n" + "\n".join(f"  `{e[:80]}`" for e in errs[-3:])
+        # Last 5 events
+        recent = ""
+        events = getattr(tg_state, 'build_events', [])
+        if events:
+            recent = "\n\n*Letzte Events:*\n" + "\n".join(
+                f"  {e['msg'][:80]}" for e in events[-5:]
+            )
+        mode_label = "Verbose" if tg_state.build_verbose else "Quiet"
+        await q.message.reply_text(
+            f"*Builder Status* -- {m2}m {s2}s\n\n"
+            f"   {progress}\n"
+            f"   Files: {capped}/{total}\n\n"
+            f"   Phase  : {tg_state.build_state.get('detailed_phase', '--')[:60]}\n"
+            f"   Action : {tg_state.build_state.get('current_action', '--')[:60]}\n"
+            f"   File   : `{tg_state.build_state.get('current_file') or '--'}`\n"
+            f"   Model  : `{tg_state.build_state.get('active_model', '--')}`\n"
+            f"   Mode   : {mode_label}"
+            + err_txt + recent,
+            parse_mode="Markdown",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "Verbose an" if not tg_state.build_verbose else "Verbose aus",
+                     "callback_data": "build_verbose_on" if not tg_state.build_verbose else "build_verbose_off"},
+                    {"text": "Aktualisieren", "callback_data": "build_status_query"},
+                ]]
+            },
+        )
+        return
+
     if data == "build_cancel":
         signal_path = getattr(tg_state, 'build_signal_path', None)
         if tg_state.active_build_proc is not None:

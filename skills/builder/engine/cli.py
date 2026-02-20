@@ -3,7 +3,7 @@ skills/builder/engine/cli.py - CLI entrypoint
 =============================================
 Hardware-optimized for RTX 5070Ti (12GB VRAM) + 64GB RAM.
 Models are loaded sequentially (one at a time) to fit in VRAM.
-Context window: 131072 tokens (qwen3-coder-next supports 128k+).
+Context window: 262144 tokens (qwen3-coder-next supports 256k+).
 """
 
 from __future__ import annotations
@@ -30,14 +30,14 @@ def main() -> None:
     print("\n+================================================================+")
     print("|        AI BUILDER v3 - Agent Pipeline Architecture             |")
     print("|  Planner -> Retriever -> Coder -> Executor -> Critic           |")
-    print("|  Sequential agents | 128k context | venv isolation             |")
+    print("|  Sequential agents | 256k context | venv isolation             |")
     print("+================================================================+\n")
 
     print("--- MODUS ---")
     print("  [1] FAST       (deepseek-r1:8b / qwen2.5-coder:7b)       64k ctx")
     print("  [2] AVERAGE    (deepseek-r1:32b / qwen2.5-coder:14b)     64k ctx")
-    print("  [3] GOD MODE   (gpt-oss:120b / qwen3-coder-next)        128k ctx  <- RECOMMENDED")
-    print("  [4] UNCENSORED (huihui_ai/qwen3-coder-next-abliterated) 128k ctx")
+    print("  [3] GOD MODE   (gpt-oss:120b / qwen3-coder-next)        256k ctx  <- RECOMMENDED")
+    print("  [4] UNCENSORED (huihui_ai/qwen3-coder-next-abliterated) 256k ctx")
     print("  [5] Custom")
 
     mode = ask(">> Modus (1-5): ", "3").strip()
@@ -46,17 +46,17 @@ def main() -> None:
         print("\nCustom-Modus")
         manager_model = ask("Manager-Modell: ", "gpt-oss:120b")
         coder_model = ask("Coder-Modell: ", "qwen3-coder-next")
-        ctx_input = ask("Context Tokens (leer = 128k): ", "131072")
-        ctx_tokens = int(ctx_input) if ctx_input.isdigit() else 131072
+        ctx_input = ask("Context Tokens (leer = 256k): ", "262144")
+        ctx_tokens = int(ctx_input) if ctx_input.isdigit() else 262144
     else:
         mode_configs = {
             "1": ("deepseek-r1:8b", "qwen2.5-coder:7b", 65536),
             "2": ("deepseek-r1:32b", "qwen2.5-coder:14b", 65536),
-            "3": ("gpt-oss:120b", "qwen3-coder-next", 131072),
+            "3": ("gpt-oss:120b", "qwen3-coder-next", 262144),
             "4": (
                 "huihui_ai/qwen3-coder-next-abliterated",
                 "huihui_ai/qwen3-coder-next-abliterated",
-                131072,
+                262144,
             ),
         }
         manager_model, coder_model, ctx_tokens = mode_configs.get(mode, mode_configs["3"])

@@ -93,7 +93,7 @@ def generate_readme(
 
 **Manager Model:** `{manager_model}`
 **Coder Model:** `{coder_model}`
-**Context Window:** 128k tokens
+**Context Window:** 256k tokens
 
 ---
 

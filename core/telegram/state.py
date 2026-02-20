@@ -53,3 +53,10 @@ build_state: dict = {
     "active_model": "",
     "current_action": "",
 }
+
+# Quiet mode: only send essential Telegram messages (start, tech, plan, approval, errors, complete)
+# Verbose mode: send every event as a separate message (old behavior)
+build_verbose: bool = False
+
+# Event log: stores ALL builder events for on-demand /builder queries
+build_events: list[dict] = []
