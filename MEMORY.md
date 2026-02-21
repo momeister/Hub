@@ -6,6 +6,18 @@
 
 ## Sessions
 
+### Session 6 — Undefined Function References Fix
+**Files modified:** `agents.py`, `skeletons.py`
+
+#### Root cause:
+`updateTurnIndicator is not defined` — The coder generates files one-by-one using `fill_in_file()`. When generating `app.js`, it sees the skeleton of `ui.js` which declares `updateTurnIndicator()`. So `app.js` calls that function. But when `ui.js` is later filled in, the coder may rename, omit, or reorganize the function. Result: `app.js` calls a function that no longer exists anywhere.
+
+Session 5's fixes catch **missing files** (HTML `<script src>` pointing to non-existent files). But this is a **missing function** problem — the file exists, it just doesn't contain the function that other files expect.
+
+#### Fixes applied:
+1. **Code coherence validation (agents.py)** — New `_validate_code_coherence()` function added after the cross-file reference check in `agent_coder`. After ALL files are generated, it concatenates all source files and asks the coder LLM to identify functions/variables/classes that are CALLED but never DEFINED in any project file. Filters out browser globals, DOM methods, standard library, and third-party imports. For each undefined reference found, it patches the target file by generating the missing function definitions with full context from the calling files. Safety check ensures patched files aren't drastically smaller than originals. Works for JavaScript, TypeScript, and Python projects.
+2. **Skeleton function enforcement (skeletons.py)** — `fill_in_file()` now parses the skeleton for the current file to extract all function/class names defined in it. These names are injected into the prompt as an explicit CRITICAL rule: "Your skeleton defines these names: X, Y, Z. You MUST implement ALL of them. Other files depend on these. Do NOT rename, omit, or reorganize them." This prevents the coder from diverging from the skeleton's API contract during fill-in.
+
 ### Session 5 — Builder Quality & Telegram Quiet Mode
 **Files modified:** `agents.py`, `sandbox.py`, `compile_checks.py`, `core/telegram/builder.py`, `core/telegram/state.py`, `core/telegram/handlers/callbacks.py`
 

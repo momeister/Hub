@@ -11,8 +11,9 @@ from skills.builder.engine.compile_checks import compile_check
 from skills.builder.engine.context import blog, MAX_REPAIR_ATTEMPTS
 from skills.builder.engine.formatters import format_code
 from skills.builder.engine.manifest import validate_manifest
-from skills.builder.engine.repair import repair_file
-from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file
+from skills.builder.engine.repair import repair_file, patch_repair_file
+from skills.builder.engine.error_analysis import analyze_errors
+from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file, _generate_single_skeleton
 from skills.builder.engine.context import write_file
 from core.llm_client import call_builder_session
 from core.utils import estimate_tokens, strip_code_fences
@@ -58,6 +59,13 @@ def _build_fill_in_prompt(
     language = blueprint["language"]
 
     ctx_parts = []
+
+    # Fix 1: Show already-implemented files (from skeletons dict updated with finished code)
+    implemented = {p: c for p, c in all_skeletons.items() if p in written_files}
+    if implemented:
+        ctx_parts.append("=== ALREADY IMPLEMENTED FILES ===")
+        for impl_path, impl_code in implemented.items():
+            ctx_parts.append(f"\n=== {impl_path} (IMPLEMENTED) ===\n{impl_code}")
 
     pending = {p: c for p, c in all_skeletons.items() if p not in written_files}
     if pending:
@@ -118,6 +126,23 @@ def skeleton_fill_in_generate(
     if actual < expected:
         blog.warning(f"Only {actual}/{expected} skeletons generated - some files may be missing")
 
+    # Fix 2: Targeted retry for individually missing skeletons
+    planned_paths = {f["path"] for f in files}
+    missing_skeletons = planned_paths - set(skeletons.keys())
+    if missing_skeletons:
+        blog.warning(f"Einzelne Skeletons fehlen, generiere nach: {missing_skeletons}")
+        for missing_path in sorted(missing_skeletons):
+            missing_spec = next((f for f in files if f["path"] == missing_path), None)
+            if not missing_spec:
+                continue
+            try:
+                single_skeleton = _generate_single_skeleton(missing_spec, blueprint, coder_model)
+                if single_skeleton:
+                    skeletons[missing_path] = single_skeleton
+                    blog.info(f"Skeleton nachgeneriert: {missing_path}")
+            except Exception as exc:
+                blog.warning(f"Konnte Skeleton für {missing_path} nicht generieren: {exc}")
+
     for path, skeleton in skeletons.items():
         full_path = os.path.join(output_dir, path)
         write_file(full_path, skeleton)
@@ -169,6 +194,7 @@ def skeleton_fill_in_generate(
         full_path = os.path.join(output_dir, file_path)
         write_file(full_path, code)
         written_files[file_path] = code
+        skeletons[file_path] = code  # Fix 1: Replace skeleton with finished code for subsequent files
 
         blog.file_done(file_path, len(code))
 
@@ -199,17 +225,47 @@ def skeleton_fill_in_generate(
             for repair_attempt in range(1, max_repairs + 1):
                 blog.repair(file_path, repair_attempt, max_repairs)
 
-                repaired = repair_file(
-                    file_path,
-                    code,
-                    errors,
-                    language,
-                    coder_model,
-                    written_files=written_files,
-                )
+                # Fix 3: Enrich errors with error analysis hints
+                analysis = analyze_errors(errors, language)
+                enriched_errors = list(errors) + [f"[HINT] {analysis['llm_hint']}"]
+
+                # Fix 3: If import_error, add relevant file content as context
+                if analysis.get("category") == "import_error" and written_files:
+                    import re as _err_re
+                    for err in errors:
+                        for fpath, fcode in written_files.items():
+                            if fpath == file_path:
+                                continue
+                            fname_stem = os.path.splitext(os.path.basename(fpath))[0]
+                            if fname_stem in err:
+                                enriched_errors.append(
+                                    f"[CONTEXT] Content of {fpath} (referenced in error):\n{fcode[:5000]}"
+                                )
+                                break
+
+                # Fix 8: Use patch repair from attempt 2 onwards
+                if repair_attempt == 1:
+                    repaired = repair_file(
+                        file_path,
+                        code,
+                        enriched_errors,
+                        language,
+                        coder_model,
+                        written_files=written_files,
+                    )
+                else:
+                    repaired = patch_repair_file(
+                        file_path,
+                        code,
+                        enriched_errors,
+                        language,
+                        coder_model,
+                        written_files=written_files,
+                    )
 
                 write_file(full_path, repaired)
                 written_files[file_path] = repaired
+                skeletons[file_path] = repaired  # Fix 1: Also update skeletons during repair
                 code = repaired
                 format_code(output_dir, language)
 

@@ -24,7 +24,7 @@ from skills.builder.engine.artifacts import (
     generate_multi_language_readme,
     generate_project_start_bat,
 )
-from skills.builder.engine.blueprint import architect_phase
+from skills.builder.engine.blueprint import architect_phase, data_contract_phase
 from skills.builder.engine.context import blog, DEFAULT_CTX_TOKENS, IN_DOCKER
 from skills.builder.engine.critic import critic_review_blueprint
 
@@ -210,11 +210,17 @@ def build_single_language_project(
     # Ensure the goal is accessible to coder agents via the blueprint
     blueprint.setdefault("_goal", goal)
 
+    # Generate data contracts if not already present
+    if not blueprint.get("data_contracts"):
+        blueprint = data_contract_phase(blueprint, manager_model)
+        # ws updated below after assignment
+
     blog.info(f"Language: {language}")
     blog.info("Mode: AGENT PIPELINE (Planner->Retriever->Coder->Executor->Critic)")
 
     # Create workspace with pre-set blueprint (skips Planner agent)
-    ws = make_workspace(goal, manager_model, coder_model, output_dir, ctx_tokens)
+    ws = make_workspace(goal, manager_model, coder_model, output_dir, ctx_tokens,
+                        review_model="nemotron-3-nano:30b")
     ws["blueprint"] = blueprint
     ws["language"] = language
 
@@ -274,7 +280,8 @@ def build_project(
     os.makedirs(output_dir, exist_ok=True)
 
     # Agent 1: Planner (uses manager model)
-    ws = make_workspace(goal, manager_model, coder_model, output_dir, ctx_tokens)
+    ws = make_workspace(goal, manager_model, coder_model, output_dir, ctx_tokens,
+                        review_model="nemotron-3-nano:30b")
     ws = agent_planner(ws)
     blueprint = ws["blueprint"]
     # Critic läuft bereits intern in agent_planner — kein zweiter Call nötig
@@ -295,6 +302,12 @@ def build_project(
         approval = _wait_for_approval()
         if approval != "approved":
             blog.info("Build cancelled by user")
+            # Clean up empty output directory so rejected builds leave no trace
+            try:
+                if os.path.isdir(output_dir) and not os.listdir(output_dir):
+                    os.rmdir(output_dir)
+            except OSError:
+                pass
             blog.complete(
                 success=False,
                 files_written=0,
@@ -304,6 +317,11 @@ def build_project(
             return
 
         blog.phase("approved", "User approved tech stack and plan - continuing build")
+
+    # Generate data contracts for cross-file consistency
+    if not blueprint.get("data_contracts"):
+        blueprint = data_contract_phase(blueprint, manager_model)
+        ws["blueprint"] = blueprint
 
     if blueprint.get("is_multi_language") and blueprint.get("subprojects"):
         blog.info("Multi-language project detected")

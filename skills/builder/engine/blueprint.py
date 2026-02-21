@@ -243,3 +243,114 @@ IMPORTANT: Output ONLY the JSON object. No explanation, no fences."""
         blog.info(f"Architecture: {dec.get('decision', '')} -- {dec.get('reasoning', '')}")
 
     return blueprint
+
+
+def data_contract_phase(blueprint: dict, architect_model: str) -> dict:
+    """
+    Generiert explizite Datenstruktur-Definitionen für alle zentralen
+    Objekte des Projekts. Diese werden in blueprint["data_contracts"]
+    gespeichert und an JEDEN nachfolgenden LLM-Call übergeben.
+
+    Das verhindert inkonsistente Datenstrukturen zwischen Dateien —
+    die häufigste Ursache für nicht-lauffähige generierte Projekte.
+    """
+    # Idempotent: skip if already generated
+    if blueprint.get("data_contracts"):
+        return blueprint
+
+    language = blueprint.get("language", "unknown")
+    goal = blueprint.get("_goal", "") or blueprint.get("project_name", "")
+    files_summary = "\n".join(
+        f"  - {f['path']}: {f.get('purpose', '')}"
+        for f in blueprint.get("files", [])[:20]
+    )
+    framework = blueprint.get("framework", "")
+
+    prompt = f"""A {language} project is being built for this goal:
+
+GOAL: "{goal}"
+FRAMEWORK: {framework or "none"}
+
+PLANNED FILES:
+{files_summary}
+
+Your task: Define ALL shared data structures that will be passed between files.
+
+For each shared object/type/interface, provide:
+1. Its exact name (as used in code)
+2. Its exact structure (field names, types, example values)
+3. Which files produce it and which files consume it
+
+RULES:
+- Only define structures that are actually shared between 2+ files
+- Be CONCRETE: use real field names, real types, real example values
+- For games: define board representation, game state, move format
+- For APIs: define request/response shapes, database models
+- For CLI tools: define config objects, data pipeline structures
+- If no shared structures exist (e.g. single-file script), return empty contracts
+
+Output ONLY this JSON:
+{{
+  "contracts": [
+    {{
+      "name": "<TypeName or variable name>",
+      "description": "<one sentence what this represents>",
+      "structure": "<exact definition — field:type pairs or interface>",
+      "example": "<concrete example value in the target language>",
+      "produced_by": ["<file.py>"],
+      "consumed_by": ["<file.py>", "<file2.py>"]
+    }}
+  ]
+}}
+
+Examples of good contracts:
+
+For a chess game (JavaScript):
+{{
+  "name": "BoardState",
+  "description": "2D array representing the chess board",
+  "structure": "board[row][col]: string|null, where row 0 = rank 8 (black side), row 7 = rank 1 (white side)",
+  "example": "board[0][4] = 'bK', board[7][4] = 'wK', board[3][3] = null",
+  "produced_by": ["game.js"],
+  "consumed_by": ["renderer.js", "ai.js", "moves.js"]
+}}
+
+For a FastAPI backend (Python):
+{{
+  "name": "TaskModel",
+  "description": "Pydantic model for a task item",
+  "structure": "id: int, title: str, done: bool, created_at: datetime",
+  "example": "TaskModel(id=1, title='Buy milk', done=False, created_at=datetime(2024,1,1))",
+  "produced_by": ["models.py"],
+  "consumed_by": ["routes.py", "database.py"]
+}}
+
+Output ONLY the JSON object. No explanation."""
+
+    blog.phase("data_contracts", "Generating shared data contracts", model=architect_model)
+
+    try:
+        response = llm_call(
+            model=architect_model,
+            prompt=prompt,
+            system="Expert software architect. Define concrete shared data structures. Output ONLY JSON.",
+            max_tokens=4096,
+            temperature=0.1,
+        )
+        raw = json.loads(clean_json(response))
+        contracts = raw.get("contracts", []) if isinstance(raw, dict) else []
+
+        if contracts:
+            blueprint["data_contracts"] = contracts
+            blog.info(f"Generated {len(contracts)} data contract(s):")
+            for c in contracts:
+                blog.info(f"  {c.get('name', '?')}: {c.get('description', '?')}")
+        else:
+            blog.info("No shared data contracts needed for this project")
+            blueprint["data_contracts"] = []
+
+    except Exception as exc:
+        blog.warning(f"Data contract generation failed ({exc}), continuing without contracts")
+        blueprint["data_contracts"] = []
+
+    return blueprint

@@ -252,10 +252,16 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except OSError:
                 pass
             try:
-                tg_state.active_build_proc.terminate()
+                tg_state.active_build_proc.kill()
             except OSError:
                 pass
-            await q.message.reply_text("*Build abgebrochen.* Tech Stack abgelehnt.", parse_mode="Markdown")
+            # Immediately clean up state so the user can start a new build
+            # without waiting for the run_builder thread to finish.
+            tg_state.active_build = None
+            tg_state.active_build_proc = None
+            tg_state.build_state["phase"] = "Abgebrochen (Tech Stack abgelehnt)"
+            tg_state.dispatcher_alive.set()
+            await q.message.reply_text("*Build abgebrochen.* Tech Stack abgelehnt.\nDispatcher wieder aktiv.", parse_mode="Markdown")
         else:
             await q.message.reply_text("Kein aktiver Build zum Abbrechen.")
         return

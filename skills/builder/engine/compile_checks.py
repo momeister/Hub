@@ -146,3 +146,73 @@ def compile_check(project_dir: str, language: str) -> tuple[bool, list[str]]:
     if checker:
         return checker(project_dir)
     return True, []
+
+
+def html_smoke_test(output_dir: str) -> tuple[bool, str]:
+    """
+    Check HTML/JS projects with minimal validation:
+    - Reads all .html files
+    - Checks that all referenced <script src> and <link href> files exist
+    - Checks that JavaScript files parse with node --check
+    Returns (True, "") on success or (False, error description) on failure.
+    """
+    import glob
+    import os
+    import re
+
+    errors = []
+    html_files = glob.glob(os.path.join(output_dir, "**/*.html"), recursive=True) + \
+                 glob.glob(os.path.join(output_dir, "*.html"))
+
+    # Deduplicate
+    html_files = list(dict.fromkeys(html_files))
+
+    if not html_files:
+        return True, ""  # No HTML, nothing to test
+
+    for html_path in html_files:
+        try:
+            content = open(html_path, encoding="utf-8").read()
+        except Exception:
+            continue
+
+        html_dir = os.path.dirname(html_path)
+
+        # Check <script src="...">
+        for src in re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE):
+            if src.startswith(("http://", "https://", "//", "data:")):
+                continue
+            abs_path = os.path.normpath(os.path.join(html_dir, src))
+            if not os.path.exists(abs_path):
+                errors.append(f"Missing script: {src} (referenced in {os.path.basename(html_path)})")
+
+        # Check <link href="...css">
+        for href in re.findall(r'<link[^>]+href=["\']([^"\']+\.css)["\']', content, re.IGNORECASE):
+            if href.startswith(("http://", "https://", "//", "data:")):
+                continue
+            abs_path = os.path.normpath(os.path.join(html_dir, href))
+            if not os.path.exists(abs_path):
+                errors.append(f"Missing stylesheet: {href} (referenced in {os.path.basename(html_path)})")
+
+    # Syntax check for all .js files with node --check
+    if shutil.which("node"):
+        js_files = glob.glob(os.path.join(output_dir, "**/*.js"), recursive=True) + \
+                   glob.glob(os.path.join(output_dir, "*.js"))
+        js_files = list(dict.fromkeys(js_files))
+        for js_path in js_files[:10]:  # Max 10 files
+            if "node_modules" in js_path:
+                continue
+            try:
+                result = subprocess.run(
+                    ["node", "--check", js_path],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode != 0:
+                    rel = os.path.relpath(js_path, output_dir)
+                    errors.append(f"JS syntax error in {rel}: {result.stderr.strip()[:200]}")
+            except Exception:
+                pass
+
+    if errors:
+        return False, "\n".join(errors)
+    return True, ""

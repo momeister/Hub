@@ -121,3 +121,66 @@ def repair_file(
     )
 
     return strip_fences(response)
+
+
+def patch_repair_file(
+    file_path: str,
+    current_code: str,
+    errors: list[str],
+    language: str,
+    coder_model: str,
+    written_files: dict | None = None,
+) -> str:
+    """
+    Targeted patch: Only repair the broken function/class,
+    not rewrite the entire file. Safer than full-regeneration
+    for follow-up repair attempts.
+    """
+    error_summary = "\n".join(errors[:8])
+    # Context: which files import this file?
+    caller_ctx = ""
+    if written_files:
+        callers = [
+            f"=== {p} ===\n{c[:1500]}"
+            for p, c in written_files.items()
+            if file_path.replace("/", ".").split(".")[0] in c and p != file_path
+        ]
+        caller_ctx = "\n\n".join(callers[:2])
+
+    prompt = f"""Fix ONLY the broken parts of this {language} file. Do NOT rewrite the whole file.
+
+FILE: {file_path}
+
+ERRORS:
+{error_summary}
+
+CURRENT CODE:
+{current_code}
+
+{"FILES THAT IMPORT THIS FILE (for context):" + chr(10) + caller_ctx if caller_ctx else ""}
+
+RULES:
+1. Output the COMPLETE file, but change ONLY what is needed to fix the errors
+2. Do NOT remove working functions, classes, or variables
+3. Do NOT add new external dependencies
+4. Preserve all existing logic that is NOT causing the errors
+5. Output ONLY the fixed code, no fences, no explanation"""
+
+    try:
+        response = llm_call(
+            model=coder_model,
+            prompt=prompt,
+            system=f"Expert {language} developer. Fix only the broken parts. Output ONLY code.",
+            max_tokens=14336,
+            temperature=0.05,
+        )
+        patched = strip_fences(response)
+        # Safety: Patch must not be drastically smaller than original
+        if len(patched) >= len(current_code) * 0.75:
+            return patched
+        else:
+            blog.warning(f"Patch für {file_path} zu klein ({len(patched)} vs {len(current_code)}), behalte Original")
+            return current_code
+    except Exception as exc:
+        blog.warning(f"Patch-Repair fehlgeschlagen: {exc}")
+        return current_code

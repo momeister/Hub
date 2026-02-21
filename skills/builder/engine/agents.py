@@ -28,9 +28,10 @@ from skills.builder.engine.critical_files import ensure_critical_files
 from skills.builder.engine.deps import install_deps, get_venv_python
 from skills.builder.engine.formatters import format_code
 from skills.builder.engine.manifest import validate_manifest
-from skills.builder.engine.repair import repair_file
+from skills.builder.engine.repair import repair_file, patch_repair_file
+from skills.builder.engine.error_analysis import analyze_errors
 from skills.builder.engine.sandbox import sandbox_test
-from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file
+from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file, _generate_single_skeleton
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,7 @@ def make_workspace(
     coder_model: str,
     output_dir: str,
     ctx_tokens: int = DEFAULT_CTX_TOKENS,
+    review_model: str = "",
 ) -> dict:
     """Create initial workspace for the agent pipeline."""
     return {
@@ -126,6 +128,7 @@ def make_workspace(
         "coder_model": coder_model,
         "output_dir": output_dir,
         "ctx_tokens": ctx_tokens,
+        "review_model": review_model,
         "blueprint": None,
         "skeletons": {},
         "written_files": {},
@@ -165,7 +168,20 @@ def agent_planner(ws: dict) -> dict:
     )
     dep_content = blueprint.get("dependencies", {}).get("content", "")[:500]
 
-    prompt = f"""You are a code project reviewer. A blueprint was generated for this goal:
+    # Fix 7: Negative examples for common blueprint mistakes
+    negative_examples = """
+KNOWN BLUEPRINT MISTAKES (check for these specifically):
+- Game requested but no interactive event handlers (click, keydown) in file list
+- "move history" feature but no component/file/function for tracking moves
+- "AI opponent" / "bot" requested but no AI logic file
+- Multi-file project but no __init__.py or index file connecting modules
+- Python web API without uvicorn/startup entry point
+- HTML project with <script src="x.js"> but x.js not in file list
+- "save/load" feature requested but no file persistence logic planned
+- "user authentication" but no session/token management file
+"""
+
+    review_prompt = f"""You are a code project reviewer. A blueprint was generated for this goal:
 
 GOAL: "{ws['goal']}"
 
@@ -177,6 +193,8 @@ BLUEPRINT SUMMARY:
   Dependency order: {dep_order[:20]}
   Dependencies: {dep_content[:300]}
 
+{negative_examples}
+
 Review for these issues ONLY:
 1. WRONG LANGUAGE: Does the language fit the goal?
 2. MISSING FILES: Are critical files missing? (entry point, config, core logic)
@@ -185,12 +203,6 @@ Review for these issues ONLY:
 5. GOAL MISMATCH: Does the file plan actually implement what was asked?
 6. MISSING FEATURES: Go through EVERY feature/requirement in the goal word by word.
    Does each requested feature have a corresponding file or function?
-   Examples of commonly missed features:
-   - "move history" -> needs a component/function to track and display moves
-   - "bot/AI opponent" -> needs AI logic file/function
-   - "UI" -> needs interactive event handlers (not just rendering)
-   - "play against" -> needs game loop with turn management
-   If ANY requested feature has no corresponding file, add it.
 
 Output ONLY this JSON:
 """ + """{
@@ -206,57 +218,121 @@ Output ONLY this JSON:
 If the blueprint looks good, return {"approved": true, "issues": [], "patches": []}.
 Output ONLY JSON."""
 
+    def _apply_review_patches(bp: dict, raw: dict, source: str) -> dict:
+        """Apply review patches from a reviewer to the blueprint."""
+        if not isinstance(raw, dict) or raw.get("approved", True):
+            blog.info(f"{source} approved blueprint")
+            return bp
+        for issue in raw.get("issues", [])[:5]:
+            blog.warning(f"{source} issue: {issue}")
+        for patch in raw.get("patches", [])[:8]:
+            action = patch.get("action", "")
+            if action == "add_file":
+                path = patch.get("path", "")
+                purpose = patch.get("purpose", "")
+                if path and path not in {f["path"] for f in bp["files"]}:
+                    bp["files"].append({
+                        "path": path, "purpose": purpose,
+                        "exports": [], "imports": [],
+                        "estimated_lines": 30, "critical": False,
+                    })
+                    if path not in bp.get("dependency_order", []):
+                        bp["dependency_order"].append(path)
+                    blog.info(f"{source} added file: {path}")
+            elif action == "remove_file":
+                path = patch.get("path", "")
+                if path:
+                    before = len(bp["files"])
+                    bp["files"] = [f for f in bp["files"] if f["path"] != path]
+                    if len(bp["files"]) < before:
+                        bp["dependency_order"] = [
+                            p for p in bp.get("dependency_order", []) if p != path
+                        ]
+                        blog.info(f"{source} removed file: {path}")
+            elif action == "reorder":
+                new_order = patch.get("dependency_order", [])
+                if new_order and isinstance(new_order, list):
+                    valid_paths = {f["path"] for f in bp["files"]}
+                    if all(p in valid_paths for p in new_order):
+                        for p in bp.get("dependency_order", []):
+                            if p not in new_order:
+                                new_order.append(p)
+                        bp["dependency_order"] = new_order
+                        blog.info(f"{source} reordered dependency chain")
+        return bp
+
+    # Stage 1: Self-Review (manager_model, temperature=0.3)
+    blog.phase("planner_self_review", "Planner self-review (Stage 1/2)", model=ws["manager_model"])
     try:
-        response = llm_call(
+        response_1 = llm_call(
             model=ws["manager_model"],
-            prompt=prompt,
+            prompt=review_prompt,
             system="You are a strict code reviewer. Output only valid JSON.",
             max_tokens=2048,
-            temperature=0.05,
+            temperature=0.3,
         )
-        raw = json.loads(clean_json(response))
-        if isinstance(raw, dict) and not raw.get("approved", True):
-            patches = raw.get("patches", [])
-            for patch in patches[:5]:
-                action = patch.get("action", "")
-                if action == "add_file":
-                    path = patch.get("path", "")
-                    purpose = patch.get("purpose", "")
-                    if path and path not in {f["path"] for f in blueprint["files"]}:
-                        blueprint["files"].append({
-                            "path": path, "purpose": purpose,
-                            "exports": [], "imports": [],
-                            "estimated_lines": 30, "critical": False,
-                        })
-                        if path not in blueprint.get("dependency_order", []):
-                            blueprint["dependency_order"].append(path)
-                        blog.info(f"Planner added file: {path}")
-                elif action == "remove_file":
-                    path = patch.get("path", "")
-                    if path:
-                        before = len(blueprint["files"])
-                        blueprint["files"] = [f for f in blueprint["files"] if f["path"] != path]
-                        if len(blueprint["files"]) < before:
-                            blueprint["dependency_order"] = [
-                                p for p in blueprint.get("dependency_order", []) if p != path
-                            ]
-                            blog.info(f"Planner removed file: {path}")
-                elif action == "reorder":
-                    new_order = patch.get("dependency_order", [])
-                    if new_order and isinstance(new_order, list):
-                        valid_paths = {f["path"] for f in blueprint["files"]}
-                        if all(p in valid_paths for p in new_order):
-                            for p in blueprint.get("dependency_order", []):
-                                if p not in new_order:
-                                    new_order.append(p)
-                            blueprint["dependency_order"] = new_order
-                            blog.info("Planner reordered dependency chain")
-            for issue in raw.get("issues", [])[:5]:
-                blog.warning(f"Planner issue: {issue}")
-        else:
-            blog.info("Planner approved blueprint")
+        raw_1 = json.loads(clean_json(response_1))
+        blueprint = _apply_review_patches(blueprint, raw_1, "Planner[self]")
     except Exception as exc:
-        blog.warning(f"Planner self-review failed ({exc}), proceeding")
+        blog.warning(f"Planner self-review failed ({exc}), continuing")
+
+    # Stage 2: Co-Review (independent second model, if configured)
+    review_model = ws.get("review_model", "")
+    if review_model:
+        blog.phase("planner_co_review", "Co-reviewer blueprint review (Stage 2/2)", model=review_model)
+        # Co-Reviewer gets the (possibly already patched) blueprint
+        # and a fresh, context-free prompt
+        co_file_summary = "\n".join(
+            f"  - {f['path']}: {f.get('purpose', '?')}"
+            for f in blueprint.get("files", [])[:25]
+        )
+        co_dep_content = blueprint.get("dependencies", {}).get("content", "")[:500]
+        co_prompt = f"""You are an independent code project reviewer with NO prior context.
+Review this blueprint for a software project and find any issues.
+
+GOAL: "{ws['goal']}"
+
+BLUEPRINT:
+  Language: {blueprint.get('language', '?')}
+  Framework: {blueprint.get('framework', 'none')}
+  Files ({len(blueprint.get('files', []))}):
+{co_file_summary}
+  Dependency order: {blueprint.get('dependency_order', [])[:20]}
+  Dependencies: {co_dep_content[:300]}
+
+{negative_examples}
+
+Be CRITICAL. Assume nothing is correct unless you verify it.
+Focus especially on: missing features from the goal, wrong file structure,
+impossible dependency orders, missing entry points.
+
+Output ONLY this JSON:
+""" + """{
+  "approved": true/false,
+  "issues": ["issue 1", "issue 2"],
+  "patches": [
+    {"action": "add_file", "path": "...", "purpose": "..."},
+    {"action": "remove_file", "path": "..."},
+    {"action": "reorder", "dependency_order": ["..."]}
+  ]
+}
+
+Output ONLY JSON."""
+
+        try:
+            response_2 = llm_call(
+                model=review_model,
+                prompt=co_prompt,
+                system="You are a strict independent code reviewer. Output only valid JSON.",
+                max_tokens=2048,
+                temperature=0.2,
+            )
+            raw_2 = json.loads(clean_json(response_2))
+            blueprint = _apply_review_patches(blueprint, raw_2, f"CoReviewer[{review_model}]")
+        except Exception as exc:
+            blog.warning(f"Co-reviewer failed ({exc}), continuing with self-review result")
+    else:
+        blog.info("No review_model configured, skipping co-review (Stage 2)")
 
     ws["blueprint"] = blueprint
     ws["language"] = blueprint.get("language", "unknown")
@@ -282,22 +358,125 @@ Output ONLY JSON."""
 def _generate_manifest_from_blueprint(
     ws: dict, manifest_name: str, dep_type: str, output_dir: str
 ) -> None:
-    """Use the LLM to generate a dependency manifest when one was not provided.
-
-    This happens for subprojects in multi-language builds where the master
-    blueprint's dependencies block doesn't cover each sub-language.
+    """Generate a dependency manifest with framework-first approach:
+    1. Start with the framework package (known correct)
+    2. Add packages derivable from file purposes
+    3. LLM only fills gaps with strict "known packages only" constraint
     """
     blueprint = ws["blueprint"]
-    files_desc = "\n".join(
-        f"  - {f['path']}: {f.get('purpose', '')}"
-        for f in blueprint.get("files", [])[:30]
-    )
-    hint = blueprint.get("dependencies", {}).get("_hint", "")
-    goal = blueprint.get("_goal", ws.get("goal", ""))
-    framework = blueprint.get("framework", "")
     language = blueprint.get("language", "")
+    framework = blueprint.get("framework", "").lower().strip()
+    goal = blueprint.get("_goal", ws.get("goal", ""))
 
-    prompt = f"""Generate the content for a **{manifest_name}** file for this project.
+    # ── Step 1: Framework seed (always correct) ──────────────────────────
+    FRAMEWORK_SEEDS = {
+        # Python
+        "fastapi":   "fastapi>=0.100\nuvicorn[standard]>=0.20\npydantic>=2.0\n",
+        "flask":     "flask>=2.3\n",
+        "django":    "django>=4.2\n",
+        "starlette": "starlette>=0.27\nuvicorn[standard]>=0.20\n",
+        "aiohttp":   "aiohttp>=3.9\n",
+        # JS/TS — handled via package.json below
+        "express":   None,
+        "react":     None,
+        "vue":       None,
+        "next":      None,
+        "svelte":    None,
+    }
+
+    seed = FRAMEWORK_SEEDS.get(framework, "")
+
+    if dep_type == "requirements_txt":
+        # Known safe additions derived from file purposes
+        files_text = " ".join(f.get("purpose", "") for f in blueprint.get("files", []))
+        additions = []
+        KNOWN_SAFE = {
+            "sqlalchemy": "sqlalchemy>=2.0",
+            "sqlite":     "# sqlite3 is stdlib",
+            "jwt":        "python-jose[cryptography]>=3.3",
+            "auth":       "passlib[bcrypt]>=1.7",
+            "pydantic":   "pydantic>=2.0",
+            "httpx":      "httpx>=0.24",
+            "requests":   "requests>=2.31",
+            "redis":      "redis>=5.0",
+            "celery":     "celery>=5.3",
+            "pandas":     "pandas>=2.0",
+            "numpy":      "numpy>=1.24",
+            "matplotlib": "matplotlib>=3.7",
+            "pytest":     "pytest>=7.4",
+            "dotenv":     "python-dotenv>=1.0",
+        }
+        for keyword, pkg_line in KNOWN_SAFE.items():
+            if keyword in files_text.lower() and pkg_line not in (seed or ""):
+                if not pkg_line.startswith("#"):
+                    additions.append(pkg_line)
+
+        base_content = (seed or "") + "\n".join(additions)
+
+        # LLM only for gaps, if really needed
+        if not base_content.strip():
+            prompt = (
+                f"Generate a minimal requirements.txt for a Python {framework or 'script'} project.\n"
+                f"Goal: {goal[:200]}\n\n"
+                "STRICT RULES:\n"
+                "- ONLY include packages you are 100% certain exist on PyPI\n"
+                "- Maximum 5 packages\n"
+                "- Prefer stdlib over external packages\n"
+                "- Output ONLY the requirements.txt content, no explanation\n"
+            )
+            try:
+                response = llm_call(
+                    model=ws.get("coder_model") or ws.get("manager_model", ""),
+                    prompt=prompt,
+                    system="Output ONLY valid requirements.txt content. Max 5 well-known packages.",
+                    max_tokens=256,
+                    temperature=0.0,
+                )
+                base_content = strip_fences(response).strip()
+            except Exception as exc:
+                blog.warning(f"Manifest LLM fallback fehlgeschlagen: {exc}")
+                base_content = ""
+
+        if base_content.strip():
+            manifest_path = os.path.join(output_dir, manifest_name)
+            write_file(manifest_path, base_content)
+            blueprint["dependencies"]["content"] = base_content
+            blog.info(f"Framework-first {manifest_name} geschrieben ({len(base_content)} bytes)")
+
+    elif dep_type == "package_json":
+        # For package.json: derive skeleton from framework
+        PACKAGE_JSON_SEEDS = {
+            "express": {
+                "name": blueprint.get("project_name", "project"),
+                "version": "1.0.0",
+                "main": "index.js",
+                "scripts": {"start": "node index.js", "dev": "nodemon index.js"},
+                "dependencies": {"express": "^4.18.2"},
+            },
+            "react": {
+                "name": blueprint.get("project_name", "project"),
+                "version": "0.1.0",
+                "private": True,
+                "scripts": {"start": "react-scripts start", "build": "react-scripts build"},
+                "dependencies": {"react": "^18.2.0", "react-dom": "^18.2.0", "react-scripts": "5.0.1"},
+            },
+        }
+        seed_json = PACKAGE_JSON_SEEDS.get(framework)
+        if seed_json:
+            import json as _json
+            content = _json.dumps(seed_json, indent=2)
+            manifest_path = os.path.join(output_dir, manifest_name)
+            write_file(manifest_path, content)
+            blueprint["dependencies"]["content"] = content
+            blog.info(f"Framework-first package.json für {framework} geschrieben")
+        else:
+            # Unknown JS framework: fall back to LLM approach
+            files_desc = "\n".join(
+                f"  - {f['path']}: {f.get('purpose', '')}"
+                for f in blueprint.get("files", [])[:30]
+            )
+            hint = blueprint.get("dependencies", {}).get("_hint", "")
+            prompt = f"""Generate the content for a **{manifest_name}** file for this project.
 
 PROJECT GOAL: {goal}
 LANGUAGE: {language}
@@ -308,31 +487,66 @@ FILES:
 {"DEPENDENCY HINTS: " + hint if hint else ""}
 
 RULES:
-- Only include packages that ACTUALLY EXIST on PyPI / npm / crates.io.
+- Only include packages that ACTUALLY EXIST on npm.
 - Do NOT invent or hallucinate package names.
-- Include the framework itself (e.g. fastapi, flask, express, react).
-- Include any libraries obviously needed by the file descriptions.
-- For requirements.txt: one package per line, pin major versions (e.g. fastapi>=0.100).
-- For package.json: valid JSON with name, version, dependencies, and scripts.
+- Maximum 10 dependencies.
+- Valid JSON with name, version, dependencies, and scripts.
 - Output ONLY the raw file content, no markdown fences, no explanation."""
 
-    try:
-        response = llm_call(
-            model=ws.get("coder_model") or ws.get("manager_model", ""),
-            prompt=prompt,
-            system="You are a dependency manifest generator. Output ONLY the file content.",
-            max_tokens=1024,
-            temperature=0.05,
+            try:
+                response = llm_call(
+                    model=ws.get("coder_model") or ws.get("manager_model", ""),
+                    prompt=prompt,
+                    system="You are a dependency manifest generator. Output ONLY the file content.",
+                    max_tokens=1024,
+                    temperature=0.05,
+                )
+                content = strip_fences(response).strip()
+                if content:
+                    manifest_path = os.path.join(output_dir, manifest_name)
+                    write_file(manifest_path, content)
+                    blog.info(f"Generated {manifest_name} via LLM ({len(content)} bytes)")
+                    blueprint["dependencies"]["content"] = content
+            except Exception as exc:
+                blog.warning(f"Failed to generate {manifest_name}: {exc}")
+    else:
+        # Other dep types (Cargo.toml, go.mod, etc.): keep original LLM approach
+        files_desc = "\n".join(
+            f"  - {f['path']}: {f.get('purpose', '')}"
+            for f in blueprint.get("files", [])[:30]
         )
-        content = strip_fences(response).strip()
-        if content:
-            manifest_path = os.path.join(output_dir, manifest_name)
-            write_file(manifest_path, content)
-            blog.info(f"Generated {manifest_name} via LLM ({len(content)} bytes)")
-            # Update blueprint deps so downstream agents can see it
-            blueprint["dependencies"]["content"] = content
-    except Exception as exc:
-        blog.warning(f"Failed to generate {manifest_name}: {exc}")
+        hint = blueprint.get("dependencies", {}).get("_hint", "")
+        prompt = f"""Generate the content for a **{manifest_name}** file for this project.
+
+PROJECT GOAL: {goal}
+LANGUAGE: {language}
+FRAMEWORK: {framework}
+FILES:
+{files_desc}
+
+{"DEPENDENCY HINTS: " + hint if hint else ""}
+
+RULES:
+- Only include packages that ACTUALLY EXIST on the respective registry.
+- Do NOT invent or hallucinate package names.
+- Output ONLY the raw file content, no markdown fences, no explanation."""
+
+        try:
+            response = llm_call(
+                model=ws.get("coder_model") or ws.get("manager_model", ""),
+                prompt=prompt,
+                system="You are a dependency manifest generator. Output ONLY the file content.",
+                max_tokens=1024,
+                temperature=0.05,
+            )
+            content = strip_fences(response).strip()
+            if content:
+                manifest_path = os.path.join(output_dir, manifest_name)
+                write_file(manifest_path, content)
+                blog.info(f"Generated {manifest_name} via LLM ({len(content)} bytes)")
+                blueprint["dependencies"]["content"] = content
+        except Exception as exc:
+            blog.warning(f"Failed to generate {manifest_name}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +652,23 @@ def agent_coder(ws: dict) -> dict:
     if actual < files_total:
         blog.warning(f"Only {actual}/{files_total} skeletons generated")
 
+    # Fix 2: Targeted retry for individually missing skeletons
+    planned_paths = {f["path"] for f in files_list}
+    missing_skeletons = planned_paths - set(skeletons.keys())
+    if missing_skeletons:
+        blog.warning(f"Einzelne Skeletons fehlen, generiere nach: {missing_skeletons}")
+        for missing_path in sorted(missing_skeletons):
+            missing_spec = next((f for f in files_list if f["path"] == missing_path), None)
+            if not missing_spec:
+                continue
+            try:
+                single_skeleton = _generate_single_skeleton(missing_spec, blueprint, coder_model)
+                if single_skeleton:
+                    skeletons[missing_path] = single_skeleton
+                    blog.info(f"Skeleton nachgeneriert: {missing_path}")
+            except Exception as exc:
+                blog.warning(f"Konnte Skeleton für {missing_path} nicht generieren: {exc}")
+
     # Write skeletons to disk
     for path, skeleton in skeletons.items():
         full_path = os.path.join(output_dir, path)
@@ -467,6 +698,7 @@ def agent_coder(ws: dict) -> dict:
         full_path = os.path.join(output_dir, file_path)
         write_file(full_path, code)
         written_files[file_path] = code
+        skeletons[file_path] = code  # Fix 1: Replace skeleton with finished code for subsequent files
         blog.file_done(file_path, len(code))
 
         # Quick compile check on just-written file
@@ -519,12 +751,36 @@ def agent_coder(ws: dict) -> dict:
 
         for repair_attempt in range(1, max_repairs + 1):
             blog.repair(file_path, repair_attempt, max_repairs)
+
+            # Fix 3: Enrich errors with error analysis hints
+            analysis = analyze_errors(errors, language)
+            enriched_errors = list(errors) + [f"[HINT] {analysis['llm_hint']}"]
+
+            # Fix 3: If import_error, add relevant file content as context
+            if analysis.get("category") == "import_error" and written_files:
+                import re as _err_re
+                for err in errors:
+                    for fpath, fcode in written_files.items():
+                        if fpath == file_path:
+                            continue
+                        # Check if the imported symbol is in another project file
+                        fname_stem = os.path.splitext(os.path.basename(fpath))[0]
+                        if fname_stem in err:
+                            enriched_errors.append(
+                                f"[CONTEXT] Content of {fpath} (referenced in error):\n{fcode[:5000]}"
+                            )
+                            break
+
             repaired = repair_file(
-                file_path, code, errors, language, coder_model,
+                file_path, code, enriched_errors, language, coder_model,
+                written_files=written_files,
+            ) if repair_attempt == 1 else patch_repair_file(
+                file_path, code, enriched_errors, language, coder_model,
                 written_files=written_files,
             )
             write_file(full_path, repaired)
             written_files[file_path] = repaired
+            skeletons[file_path] = repaired  # Fix 1: Also update skeletons during repair
             code = repaired
             format_code(output_dir, language)
 
@@ -551,6 +807,14 @@ def agent_coder(ws: dict) -> dict:
             write_file(full_path, fresh_code)
             written_files[file_path] = fresh_code
             format_code(output_dir, language)
+
+        # Fix 4: Intermediate coherence check every 4 files
+        if file_index % 4 == 0 and file_index > 0 and language in ("javascript", "typescript", "python"):
+            blog.info(f"Zwischen-Coherence-Check nach {file_index} Dateien...")
+            written_files = _validate_code_coherence(
+                output_dir, language, coder_model, ctx_tokens,
+                written_files, blueprint, skeletons,
+            )
 
     # Post-coder validation: ensure all planned files were actually generated
     planned_paths = {f["path"] for f in files_list}
@@ -636,8 +900,186 @@ def agent_coder(ws: dict) -> dict:
             except Exception as exc:
                 blog.error(f"Failed to generate referenced file {ref_path}: {exc}", severity="warning")
 
+    # ── Code coherence validation ────────────────────────────────────────
+    # After ALL files are generated, check for functions/variables that are
+    # CALLED but never DEFINED anywhere in the project.  This catches the
+    # case where the coder references a skeleton function that was never
+    # implemented (e.g., updateTurnIndicator called but not defined).
+    if language in ("javascript", "typescript") and written_files:
+        written_files = _validate_code_coherence(
+            output_dir, language, coder_model, ctx_tokens,
+            written_files, blueprint, skeletons,
+        )
+    elif language == "python" and written_files:
+        written_files = _validate_code_coherence(
+            output_dir, language, coder_model, ctx_tokens,
+            written_files, blueprint, skeletons,
+        )
+
     ws["written_files"] = written_files
     return ws
+
+
+# ---------------------------------------------------------------------------
+# Helper: Code coherence validation
+# ---------------------------------------------------------------------------
+def _validate_code_coherence(
+    output_dir: str,
+    language: str,
+    coder_model: str,
+    ctx_tokens: int,
+    written_files: dict,
+    blueprint: dict,
+    skeletons: dict,
+) -> dict:
+    """Validate that all cross-file function/variable references resolve.
+
+    Uses the LLM to review all generated code and identify functions,
+    variables, or classes that are CALLED but never DEFINED.  If issues
+    are found, the affected files are patched to add the missing
+    definitions.
+    """
+    blog.phase("coherence_check", "Validating cross-file code coherence", model=coder_model)
+
+    # Build a combined view of code files (only source code, not configs)
+    code_exts = {
+        "javascript": (".js", ".mjs", ".jsx"),
+        "typescript": (".ts", ".tsx", ".mts"),
+        "python": (".py",),
+    }
+    exts = code_exts.get(language, (".js", ".py"))
+    code_files = {p: c for p, c in written_files.items() if p.endswith(exts)}
+
+    if not code_files:
+        return written_files
+
+    # Concatenate all code for the LLM review
+    code_parts = []
+    for fpath in sorted(code_files.keys()):
+        code_parts.append(f"=== {fpath} ===\n{code_files[fpath]}")
+    all_code = "\n\n".join(code_parts)
+
+    # Respect context limits
+    max_chars = int(ctx_tokens * 2.5)  # rough char-to-token ratio
+    if len(all_code) > max_chars:
+        all_code = all_code[:max_chars] + "\n... (truncated)"
+
+    review_prompt = f"""Review ALL {language} source files below from a SINGLE project.
+Find functions, variables, or classes that are CALLED or REFERENCED but
+NEVER DEFINED or IMPORTED in ANY of the project files.
+
+Ignore:
+  - Browser/Node globals (document, window, console, setTimeout, fetch, require, module, exports, process, Buffer, __dirname, Promise, Map, Set, Array, Object, JSON, Math, Date, RegExp, Error, parseInt, parseFloat, isNaN, alert, confirm, prompt)
+  - DOM methods (getElementById, querySelector, addEventListener, createElement, appendChild, etc.)
+  - Standard library functions
+  - Third-party package imports (from node_modules or pip packages)
+  - Method calls on objects (like obj.method() — only flag if obj itself is undefined)
+  - Callbacks passed to event listeners
+
+Only flag references where the function/class IS expected to be defined
+within THIS project but is missing.
+
+{all_code}
+
+Output ONLY valid JSON — an array of issues.  Each issue:
+{{"file": "<file that CALLS the undefined reference>",
+  "reference": "<function/variable name that is undefined>",
+  "called_as": "<the actual call expression, e.g. updateTurnIndicator()>",
+  "should_be_in": "<file where it logically belongs, or same file>"}}
+
+If NO issues found, output: []
+Output ONLY JSON, no explanation."""
+
+    try:
+        response = llm_call(
+            model=coder_model,
+            prompt=review_prompt,
+            system=f"Expert {language} code reviewer. Find undefined references. Output ONLY valid JSON.",
+            max_tokens=4096,
+            temperature=0.05,
+        )
+        issues = json.loads(clean_json(response))
+    except Exception as exc:
+        blog.warning(f"Coherence check parse failed: {exc}")
+        return written_files
+
+    if not isinstance(issues, list) or len(issues) == 0:
+        blog.verify(True, "coherence", "No undefined cross-file references found")
+        return written_files
+
+    blog.warning(f"Found {len(issues)} undefined reference(s): "
+                 + ", ".join(i.get('reference', '?') for i in issues[:8]))
+
+    # Group issues by the file that SHOULD contain the definition
+    from collections import defaultdict
+    fixes_by_file: dict[str, list[dict]] = defaultdict(list)
+    for issue in issues:
+        target = issue.get("should_be_in", issue.get("file", ""))
+        # Normalise: if the target file doesn't exist, put it in the caller
+        if target not in written_files:
+            target = issue.get("file", "")
+        if target in written_files:
+            fixes_by_file[target].append(issue)
+
+    for target_file, file_issues in fixes_by_file.items():
+        current_code = written_files[target_file]
+        missing_names = [i.get("reference", "?") for i in file_issues]
+
+        blog.info(f"Patching {target_file} to add: {', '.join(missing_names)}")
+
+        # Provide context: the files that CALL the missing references
+        callers_context = []
+        caller_files = set(i.get("file", "") for i in file_issues)
+        for cf in caller_files:
+            if cf in written_files and cf != target_file:
+                callers_context.append(f"=== {cf} ===\n{written_files[cf]}")
+
+        callers_str = "\n\n".join(callers_context[:3])
+        if len(callers_str) > 10000:
+            callers_str = callers_str[:10000] + "\n...(truncated)"
+
+        fix_prompt = f"""The file below is part of a {language} project.
+These functions/variables are CALLED in other files but are MISSING from this file:
+
+{chr(10).join(f"  - {i.get('reference','?')}: called as {i.get('called_as','?')} in {i.get('file','?')}" for i in file_issues)}
+
+CURRENT FILE ({target_file}):
+{current_code}
+
+FILES THAT CALL THE MISSING REFERENCES:
+{callers_str}
+
+RULES:
+  1. Output the COMPLETE file with ALL missing functions/variables ADDED
+  2. Implement them properly — study how they are called in the other files
+     to determine the correct signature, parameters, and return values
+  3. Do NOT remove or break any existing code
+  4. Do NOT add imports for packages not already used
+  5. Output ONLY code, no markdown fences, no explanation"""
+
+        try:
+            fix_response = llm_call(
+                model=coder_model,
+                prompt=fix_prompt,
+                system=f"Expert {language} developer. Add missing function definitions. Output ONLY code.",
+                max_tokens=14336,
+                temperature=0.1,
+            )
+            fixed_code = strip_fences(fix_response)
+
+            # Safety check: patched file shouldn't be drastically smaller
+            if len(fixed_code) >= len(current_code) * 0.7:
+                full_path = os.path.join(output_dir, target_file)
+                write_file(full_path, fixed_code)
+                written_files[target_file] = fixed_code
+                blog.info(f"Patched {target_file}: added {', '.join(missing_names)}")
+            else:
+                blog.warning(f"Coherence fix for {target_file} was too small, skipping")
+        except Exception as exc:
+            blog.warning(f"Coherence fix failed for {target_file}: {exc}")
+
+    blog.verify(True, "coherence", f"Patched {len(fixes_by_file)} file(s) for undefined references")
+    return written_files
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +1113,17 @@ def agent_executor(ws: dict) -> dict:
         ws["errors"] = errors
         for e in errors[:10]:
             blog.error(e, severity="compile")
+
+    # Fix 5: HTML/JS smoke test for web projects
+    if language in ("javascript", "html", "typescript"):
+        from skills.builder.engine.compile_checks import html_smoke_test
+        html_ok, html_errors = html_smoke_test(output_dir)
+        if not html_ok:
+            blog.warning(f"HTML smoke test fehlgeschlagen:\n{html_errors}")
+            ws["errors"].extend(html_errors.splitlines())
+            ws["compile_ok"] = False
+        else:
+            blog.verify(True, "html_smoke", "HTML/JS smoke test bestanden")
 
     # Install dependencies before sandbox test
     _MANIFEST_FOR_LANG = {

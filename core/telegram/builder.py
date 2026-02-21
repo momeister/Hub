@@ -375,8 +375,17 @@ def run_builder(chat_id: int, answers: dict) -> None:
         elapsed = int(time.time() - tg_state.build_state["started_at"])
         mins, secs = divmod(elapsed, 60)
 
-        # Always send a final completion message to Telegram
-        if proc.returncode == 0:
+        # Detect if this was a cancelled/rejected build
+        was_cancelled = (
+            tg_state.build_state.get("phase", "").startswith("Abgebrochen")
+            or (not files_written and tg_state.build_state.get("current_action") == "Waiting for user approval")
+        )
+
+        # Don't send a completion message if the build was already cancelled
+        # via techapprove_no (the callback handler already informed the user)
+        if was_cancelled:
+            pass  # User already notified by techapprove_no handler
+        elif proc.returncode == 0 and files_written:
             file_list = "\n".join(f"  `{_esc(f)}`" for f in files_written[-25:]) if files_written else "  --"
             err_section = ""
             if errors_found:
