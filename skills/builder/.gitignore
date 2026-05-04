@@ -1,0 +1,5 @@
+tmpclaude-*
+*.cwd
+__pycache__/
+*.pyc
+.venv/

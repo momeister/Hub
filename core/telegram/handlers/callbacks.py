@@ -231,10 +231,11 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "techapprove_yes":
         signal_path = getattr(tg_state, 'build_signal_path', None)
+        build_token = getattr(tg_state, 'build_token', '')
         if signal_path and tg_state.active_build_proc is not None:
             try:
                 with open(signal_path, "w") as f:
-                    f.write("approved\n")
+                    f.write(f"approved:{build_token}\n")
             except OSError as exc:
                 await q.message.reply_text(f"Fehler: `{exc}`")
                 return

@@ -15,6 +15,7 @@ from skills.builder.engine.repair import repair_file, patch_repair_file
 from skills.builder.engine.error_analysis import analyze_errors
 from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file, _generate_single_skeleton
 from skills.builder.engine.context import write_file
+from skills.builder.engine.utils import sanitize_skeleton_paths
 from core.llm_client import call_builder_session
 from core.utils import estimate_tokens, strip_code_fences
 
@@ -60,6 +61,35 @@ def _build_fill_in_prompt(
 
     ctx_parts = []
 
+    # Project goal
+    goal = blueprint.get("_goal", "") or blueprint.get("project_name", "").replace("_", " ")
+    if goal:
+        ctx_parts.append(f"=== PROJECT GOAL ===\n{goal}")
+
+    # Data contracts (critical for consistency)
+    contracts = blueprint.get("data_contracts", [])
+    if contracts:
+        contract_lines = [
+            f"  {c['name']}: {c['structure']}\n  Example: {c['example']}"
+            for c in contracts
+        ]
+        ctx_parts.append(
+            "=== SHARED DATA CONTRACTS (MANDATORY — use EXACT field names) ===\n"
+            + "\n\n".join(contract_lines)
+        )
+
+    # API endpoints (critical for full-stack)
+    api_endpoints = blueprint.get("api_endpoints", [])
+    if api_endpoints:
+        ep_lines = [
+            f"  {ep.get('method', '?')} {ep.get('path', '?')}: {ep.get('description', '')}"
+            for ep in api_endpoints
+        ]
+        ctx_parts.append(
+            "=== API ENDPOINTS (MANDATORY — use EXACT paths and methods) ===\n"
+            + "\n".join(ep_lines)
+        )
+
     # Fix 1: Show already-implemented files (from skeletons dict updated with finished code)
     implemented = {p: c for p, c in all_skeletons.items() if p in written_files}
     if implemented:
@@ -79,6 +109,42 @@ def _build_fill_in_prompt(
 
     context = "\n".join(ctx_parts)
 
+    # Full-stack rules based on file type
+    fullstack_rules = ""
+    if api_endpoints:
+        path_lower = path.lower()
+        is_frontend = any(kw in path_lower for kw in [
+            "frontend/", "client/", "src/", "public/",
+            "api.js", "api.ts", "app.jsx", "app.tsx",
+            ".html", ".jsx", ".tsx", ".vue", ".svelte",
+        ])
+        is_backend = any(kw in path_lower for kw in [
+            "backend/", "server/", "routes", "app.py", "main.py",
+            "server.py", "handler", "controller", "middleware",
+        ])
+
+        ep_ref = "\n".join(
+            f"    {ep.get('method', '?')} {ep.get('path', '?')}"
+            for ep in api_endpoints
+        )
+
+        if is_frontend:
+            fullstack_rules = f"""
+  FULL-STACK FRONTEND RULES:
+  - API endpoint URLs MUST match the backend EXACTLY:
+{ep_ref}
+  - Use try-catch for ALL API calls with proper error handling
+  - Do NOT implement business/game/domain logic — call the backend API instead
+  - Every function must be FULLY implemented, no stubs or TODOs"""
+        elif is_backend:
+            fullstack_rules = f"""
+  FULL-STACK BACKEND RULES:
+  - Route paths MUST match EXACTLY:
+{ep_ref}
+  - Include CORS middleware for cross-origin requests
+  - ALL business logic must be fully implemented here
+  - Every function must be FULLY implemented, no stubs or TODOs"""
+
     return f"""Implement the file: {path}
 
 Purpose: {purpose}
@@ -90,10 +156,15 @@ Complete implementation for {path}. Output ONLY the code, no fences, no explanat
 
 RULES:
   1. Use EXACT imports from skeletons
-  2. Full implementation, no placeholders
+  2. Full implementation, no placeholders, no stubs, no TODO comments.
+     FORBIDDEN: pass, ..., TODO, FIXME, empty function bodies, placeholder returns.
   3. Follow {language} idioms
   4. Handle errors properly
-  5. Add brief comments for complex logic"""
+  5. Add brief comments for complex logic
+  6. JAVASCRIPT: If using DOM, include DOMContentLoaded init pattern at end of file.
+     If making API calls, define const API_BASE_URL = 'http://localhost:8000' and use it.
+  7. PYTHON BACKEND: Include CORS middleware if using FastAPI/Flask.
+     End with if __name__ == "__main__": uvicorn.run() or app.run().{fullstack_rules}"""
 
 
 def skeleton_fill_in_generate(
@@ -102,6 +173,7 @@ def skeleton_fill_in_generate(
     coder_model: str,
     output_dir: str,
     ctx_tokens: int,
+    ws: dict | None = None,
 ) -> dict:
     """Generate all files using skeleton-fill-in strategy."""
     language = blueprint["language"]
@@ -120,6 +192,10 @@ def skeleton_fill_in_generate(
     if not skeletons:
         blog.error("Skeleton generation failed after 2 attempts", severity="fatal")
         raise RuntimeError("Could not generate any file skeletons from LLM output")
+
+    # Fix: Strip subproject name prefix from skeleton paths to prevent
+    # nested folders (e.g. output/backend/backend/main.py)
+    skeletons = sanitize_skeleton_paths(skeletons, blueprint)
 
     expected = len(files)
     actual = len(skeletons)
@@ -147,6 +223,15 @@ def skeleton_fill_in_generate(
         full_path = os.path.join(output_dir, path)
         write_file(full_path, skeleton)
 
+    # System 1: Load pre-written contract stubs into workspace and disk.
+    _pre_written = blueprint.get("pre_written_files", {})
+    if _pre_written:
+        blog.info(f"Loading {len(_pre_written)} pre-written contract stub(s)")
+        for _stub_path, _stub_code in _pre_written.items():
+            _stub_full_path = os.path.join(output_dir, _stub_path)
+            write_file(_stub_full_path, _stub_code)
+            skeletons[_stub_path] = _stub_code
+
     blog.phase("manifest_validation", "Validating manifest and installing dependencies")
     validate_manifest(output_dir, language, coder_model, skeletons)
 
@@ -156,18 +241,45 @@ def skeleton_fill_in_generate(
     # would only trigger pointless repair loops.
 
     written_files: dict[str, str] = {}
+
+    # System 1: Pre-populate written_files with contract stubs so the Coder
+    # treats them as already-implemented files.
+    for _stub_path, _stub_code in _pre_written.items():
+        written_files[_stub_path] = _stub_code
+
     file_index = 0
 
     # Persistent builder session
     session_messages = [
-        {"role": "system", "content": f"Expert {language} developer. "
-         "Output ONLY code, no markdown fences, no explanation."}
+        {"role": "system", "content": (
+            f"Expert {language} developer. "
+            "Output ONLY code, no markdown fences, no explanation.\n\n"
+            "CRITICAL RULES:\n"
+            "1. NEVER leave empty functions, stubs, or placeholders. Every function MUST be fully implemented.\n"
+            "   FORBIDDEN: pass, ..., TODO, FIXME, 'implement later', empty function bodies, placeholder returns.\n"
+            "2. For frontend JavaScript files:\n"
+            "   - ALWAYS define const API_BASE_URL = 'http://localhost:8000' at the top if making API calls\n"
+            "   - ALWAYS use DOMContentLoaded or document.readyState check to initialize:\n"
+            "     if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }\n"
+            "   - ALWAYS connect ALL event listeners in an init() function\n"
+            "   - NEVER use relative fetch URLs — always use fetch(`${API_BASE_URL}/path`)\n"
+            "3. For Python backend (FastAPI/Flask):\n"
+            "   - ALWAYS include CORS middleware (CORSMiddleware with allow_origins=['*'])\n"
+            "   - ALWAYS end with: if __name__ == '__main__': uvicorn.run(app, host='127.0.0.1', port=8000)\n"
+            "4. Every function that is defined MUST contain real, working implementation logic.\n"
+            "5. ALL imports must resolve to actual files or installed packages."
+        )}
     ]
 
     for file_path in dep_order:
         file_spec = next((f for f in files if f["path"] == file_path), None)
         if not file_spec:
             blog.warning(f"File {file_path} in dep order but not in plan, skipping")
+            continue
+
+        # System 1: Skip files that are pre-written contract stubs.
+        if file_path in blueprint.get("pre_written_files", {}):
+            blog.info(f"Skipping pre-written stub: {file_path}")
             continue
 
         file_index += 1
@@ -190,6 +302,27 @@ def skeleton_fill_in_generate(
             temperature=0.1,
         )
         code = strip_code_fences(raw_code)
+
+        # System 2: Contract verification against OpenAPI spec (if present)
+        openapi_spec = blueprint.get("openapi_spec", {})
+        if openapi_spec and openapi_spec.get("paths") and file_path.endswith((".py", ".js", ".ts", ".jsx", ".tsx")):
+            try:
+                from skills.builder.engine.contract_verifier import run_contract_verification_loop
+                from skills.builder.engine.context import llm_call as _cv_llm_call
+                # Use the real ws so violations are tracked in the main workspace.
+                # Fall back to a minimal dict if ws was not passed.
+                _cv_target_ws = ws if ws is not None else {
+                    "openapi_spec": openapi_spec,
+                    "contract_violations": [],
+                }
+                code = run_contract_verification_loop(
+                    _cv_target_ws, file_path, code,
+                    max_repair_attempts=2,
+                    llm_call_fn=_cv_llm_call,
+                    coder_model=coder_model,
+                )
+            except Exception as _cv_exc:
+                blog.warning(f"Contract verification skipped for {file_path}: {_cv_exc}")
 
         full_path = os.path.join(output_dir, file_path)
         write_file(full_path, code)

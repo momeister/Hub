@@ -13,6 +13,25 @@ venv/
 
 # Output
 output/
+MEMORY.md
+
+# Archives / packaged artifacts
+*.zip
+
+# Editor / OS clutter
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+nul
+
+# Python / test caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
 
 # Temp Files
 tmpclaude-*

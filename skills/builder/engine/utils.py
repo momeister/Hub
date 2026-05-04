@@ -45,6 +45,58 @@ def detect_language_from_ext(path: str) -> str:
     return mapping.get(ext, "unknown")
 
 
+def sanitize_skeleton_paths(skeletons: dict, blueprint: dict) -> dict:
+    """Strip subproject/project name prefix from skeleton paths.
+
+    When generating skeletons for a subproject (e.g. 'backend'), the LLM
+    often outputs paths like 'backend/main.py' instead of 'main.py'.
+    Since the output directory is already the subproject folder, writing
+    the prefixed path creates nested folders: output/backend/backend/main.py.
+
+    This function strips the project_name prefix so files land in the
+    correct directory.
+    """
+    project_name = blueprint.get("project_name", "")
+    if not project_name:
+        return skeletons
+
+    prefix = project_name + "/"
+    planned_paths = {f["path"] for f in blueprint.get("files", [])}
+
+    sanitized = {}
+    stripped_count = 0
+
+    for path, content in skeletons.items():
+        if path.startswith(prefix):
+            stripped = path[len(prefix):]
+            # If the unprefixed version already exists in skeletons, skip the prefixed duplicate
+            if stripped in skeletons:
+                stripped_count += 1
+                continue
+            sanitized[stripped] = content
+            stripped_count += 1
+            continue
+
+        # Also catch double-nesting: backend/backend/main.py -> main.py
+        double_prefix = prefix + prefix
+        if path.startswith(double_prefix):
+            stripped = path[len(double_prefix):]
+            if stripped not in sanitized:
+                sanitized[stripped] = content
+                stripped_count += 1
+                continue
+
+        sanitized[path] = content
+
+    if stripped_count:
+        blog.warning(
+            f"Sanitized skeleton paths: stripped '{prefix}' prefix from "
+            f"{stripped_count} path(s) to prevent nested subproject folders"
+        )
+
+    return sanitized
+
+
 def parse_multi_file_output(text: str) -> dict:
     """
     Parse LLM output with multiple files in format:

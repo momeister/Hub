@@ -5,6 +5,7 @@ skills/builder/engine/skeletons.py - Skeleton generation
 
 from __future__ import annotations
 
+import json
 import os
 
 from core.utils import estimate_tokens
@@ -21,6 +22,8 @@ def _build_prioritized_context(
     deps: dict,
     ctx_tokens: int,
     current_file_path: str,
+    api_endpoints: list | None = None,
+    stub_instructions: list | None = None,
 ) -> str:
     """
     Baut den Kontext in Prioritätsreihenfolge auf und schneidet nur
@@ -49,6 +52,21 @@ def _build_prioritized_context(
         ]
         parts_critical.append(
             "=== SHARED DATA CONTRACTS (MANDATORY) ===\n" + "\n\n".join(contract_lines)
+        )
+    if api_endpoints:
+        ep_lines = [
+            f"  {ep.get('method', '?')} {ep.get('path', '?')}: {ep.get('description', '')}"
+            for ep in api_endpoints
+        ]
+        parts_critical.append(
+            "=== API ENDPOINTS (MANDATORY — use EXACT paths) ===\n" + "\n".join(ep_lines)
+        )
+
+    # Stub instructions from Contract-First system (System 1)
+    if stub_instructions:
+        parts_critical.append(
+            "=== CONTRACT STUBS (MANDATORY — do NOT modify signatures) ===\n"
+            + "\n".join(f"  - {inst}" for inst in stub_instructions)
         )
 
     # Prio 2: Pending Skeletons (immer — der Coder braucht die Interfaces)
@@ -116,6 +134,58 @@ def _build_prioritized_context(
 
 
 def generate_all_skeletons(blueprint: dict, coder_model: str) -> dict:
+    """Generate skeletons for all files, batching if the project is large."""
+    language = blueprint["language"]
+    files_list = blueprint["files"]
+
+    total_estimated = sum(f.get("estimated_lines", 30) for f in files_list)
+
+    # Batch large projects to avoid exceeding LLM context limits
+    if total_estimated > 500 and len(files_list) > 6:
+        blog.phase(
+            "skeleton_batch",
+            f"Large project ({len(files_list)} files, ~{total_estimated} lines) — batching skeleton generation",
+            model=coder_model,
+        )
+        return _generate_skeletons_batched(blueprint, coder_model)
+
+    return _generate_skeletons_single(blueprint, coder_model)
+
+
+def _generate_skeletons_batched(blueprint: dict, coder_model: str) -> dict:
+    """Generate skeletons in batches for large projects."""
+    files_list = blueprint["files"]
+    all_skeletons: dict[str, str] = {}
+
+    # Split into batches of ~6 files each
+    batch_size = 6
+    batches = [files_list[i:i + batch_size] for i in range(0, len(files_list), batch_size)]
+
+    blog.info(f"Splitting {len(files_list)} files into {len(batches)} batches of ~{batch_size}")
+
+    for batch_idx, batch_files in enumerate(batches, 1):
+        blog.phase(
+            "skeleton_batch_n",
+            f"Skeleton batch {batch_idx}/{len(batches)} ({len(batch_files)} files)",
+            model=coder_model,
+        )
+
+        # Create a sub-blueprint with just this batch's files
+        batch_blueprint = dict(blueprint)
+        batch_blueprint["files"] = batch_files
+
+        # Include already-generated skeletons as context so later batches
+        # know about earlier files' interfaces
+        batch_blueprint["_prior_skeletons"] = dict(all_skeletons)
+
+        batch_skeletons = _generate_skeletons_single(batch_blueprint, coder_model)
+        all_skeletons.update(batch_skeletons)
+        blog.info(f"Batch {batch_idx}: generated {len(batch_skeletons)} skeletons (total: {len(all_skeletons)})")
+
+    return all_skeletons
+
+
+def _generate_skeletons_single(blueprint: dict, coder_model: str) -> dict:
     """Generate skeletons for all files in one call."""
     language = blueprint["language"]
     files_list = blueprint["files"]
@@ -154,11 +224,45 @@ def generate_all_skeletons(blueprint: dict, coder_model: str) -> dict:
             + "\n"
         )
 
+    # Build API endpoints section for full-stack projects
+    api_endpoints = blueprint.get("api_endpoints", [])
+    api_section = ""
+    if api_endpoints:
+        ep_lines = []
+        for ep in api_endpoints:
+            ep_lines.append(
+                f"  {ep.get('method', '?')} {ep.get('path', '?')}: {ep.get('description', '')}\n"
+                f"    Request: {json.dumps(ep.get('request_body', {}))}\n"
+                f"    Response: {json.dumps(ep.get('response_body', {}))}"
+            )
+        api_section = (
+            "\nAPI ENDPOINTS (CRITICAL — frontend and backend MUST use these EXACT paths and formats):\n"
+            + "\n".join(ep_lines)
+            + "\n"
+        )
+
+    # Include prior skeletons from earlier batches (for batched generation)
+    prior_section = ""
+    prior_skeletons = blueprint.get("_prior_skeletons", {})
+    if prior_skeletons:
+        prior_parts = []
+        for p_path, p_code in sorted(prior_skeletons.items()):
+            # Truncate to keep context manageable
+            preview = p_code[:1500] if len(p_code) > 1500 else p_code
+            prior_parts.append(f"=== {p_path} ===\n{preview}")
+        prior_section = (
+            "\nALREADY GENERATED SKELETONS (from previous batch — use these interfaces):\n"
+            + "\n\n".join(prior_parts)
+            + "\n"
+        )
+
     prompt = f"""Generate SKELETONS (signatures only, NO implementations) for ALL files in this {language} project.
 
 PROJECT: "{blueprint.get('project_name', '')}"
 FULL GOAL: "{goal}"
 {contracts_section}
+{api_section}
+{prior_section}
 {dep_info}
 FILES TO CREATE:
 {file_specs_str}
@@ -196,8 +300,37 @@ RULES (CRITICAL):
       If the goal mentions "move history", there MUST be functions for recording/displaying moves.
       If the goal mentions "bot/AI", there MUST be functions for AI move selection.
       If the goal mentions "UI", there MUST be event handlers for user interaction (click, drag, input).
-  11. For Python web apps (FastAPI/Flask), the entry point MUST include:
-      if __name__ == "__main__": with uvicorn.run() or app.run()"""
+  11. FILE PATHS: Use EXACTLY the file paths from the FILES list above.
+      Do NOT add any folder prefix to the paths. If the file is listed as "main.py",
+      output "=== main.py ===" NOT "=== backend/main.py ===" or "=== project_name/main.py ===".
+      The output directory is already set correctly — adding prefixes creates nested folders.
+  12. For Python web apps (FastAPI/Flask), the entry point MUST include:
+      if __name__ == "__main__": with uvicorn.run() or app.run()
+  13. FULL-STACK API INTEGRATION (for projects with both frontend and backend):
+      a. Frontend API module: every API function signature MUST have a doc-comment specifying:
+         - Endpoint URL and HTTP method (e.g. POST /games)
+         - Request body structure
+         - Response body structure
+         - Transformed return type (what the frontend actually uses)
+         Example:
+         // createGame() - POST /games
+         // Request: {{}} (empty)
+         // Response: {{ game_id: string, board_fen: string, turn: string, status: string }}
+         // Returns: {{ gameId: string, board: string[][], turn: string, status: string }}
+         function createGame() {{ }}
+      b. Include data transformation utility signatures when backend/frontend formats differ:
+         - fenToBoard(fen) — convert backend format to frontend renderable format
+         - coordsToUCI(from, to) — convert UI coordinates to backend move format
+         - Any other conversions needed based on the data contracts
+      c. Backend route handler signatures MUST match the exact URL paths from the API contracts
+      d. Backend MUST include CORS middleware setup in the entry point skeleton
+      e. Frontend API calls MUST use the EXACT same URL paths as backend routes
+      f. LOGIC SEPARATION: Business logic, game logic, AI/bot logic, and domain rules
+         belong ONLY in backend files. Frontend files should only have:
+         - API call functions (fetch/axios wrappers)
+         - UI rendering and event handling
+         - Data transformation utilities (converting backend format to UI format)
+         Frontend must NOT have functions that duplicate backend computation."""
 
     system = f"Expert {language} architect. Output ONLY skeletons, no implementations."
 
@@ -272,6 +405,8 @@ def fill_in_file(
         deps=deps,
         ctx_tokens=ctx_tokens,
         current_file_path=path,
+        api_endpoints=blueprint.get("api_endpoints", []),
+        stub_instructions=blueprint.get("stub_instructions", []),
     )
 
     # Detect if this is a Python entry point that uses a web framework
@@ -309,6 +444,78 @@ def fill_in_file(
                 f"     Every function/class from the skeleton MUST appear in your output."
             )
 
+    # Full-stack API integration rules (conditional)
+    fullstack_rules = ""
+    api_endpoints = blueprint.get("api_endpoints", [])
+    if api_endpoints:
+        # Detect if this is a frontend or backend file
+        path_lower = path.lower()
+        is_frontend = any(kw in path_lower for kw in [
+            "frontend/", "client/", "src/", "public/",
+            "api.js", "api.ts", "app.jsx", "app.tsx",
+            ".html", ".jsx", ".tsx", ".vue", ".svelte",
+        ])
+        is_backend = any(kw in path_lower for kw in [
+            "backend/", "server/", "routes", "app.py", "main.py",
+            "server.py", "handler", "controller", "middleware",
+        ])
+
+        # Build endpoint reference
+        ep_ref = "\n".join(
+            f"    {ep.get('method', '?')} {ep.get('path', '?')}"
+            for ep in api_endpoints
+        )
+
+        if is_frontend:
+            fullstack_rules = f"""
+  FULL-STACK FRONTEND RULES (CRITICAL — prevents blank-screen bugs):
+  - API endpoint URLs MUST match the backend EXACTLY. The defined endpoints are:
+{ep_ref}
+  - EVERY API call MUST use try-catch with proper error handling:
+    try {{
+      const response = await fetch('/exact/backend/path', ...);
+      if (!response.ok) {{ const err = await response.json(); throw new Error(err.detail || 'Request failed'); }}
+      const data = await response.json();
+      // use data
+    }} catch (error) {{ console.error('Context:', error); showUserError(error.message); }}
+  - Add data transformation functions when the backend format differs from the UI format
+  - Include loading states (show spinner/message while waiting for API responses)
+  - NEVER render UI elements that depend on API data before the data is received
+  - Validate API responses before using: check that expected fields exist
+  - Log API responses during development: console.log('API Response:', data);
+  - LOGIC SEPARATION (CRITICAL): Do NOT implement any business/game/domain logic in the frontend.
+    ALL computation, validation, rule enforcement, AI/bot logic, and data processing MUST happen
+    in the backend. The frontend's ONLY job is:
+    1. Send user actions to the backend via API calls
+    2. Receive results from the backend
+    3. Render the results in the UI
+    Example: For a chess game, the frontend MUST NOT validate moves or generate bot moves.
+    Instead, it sends the user's move to the backend and displays the backend's response.
+  - NO STUBS: Every function must be FULLY implemented. No empty functions, no TODO comments,
+    no placeholder returns. If a function exists, it must work completely."""
+        elif is_backend:
+            fullstack_rules = f"""
+  FULL-STACK BACKEND RULES (CRITICAL — ensures frontend integration works):
+  - Route paths MUST match EXACTLY. The defined endpoints are:
+{ep_ref}
+  - Add CORS middleware to allow the frontend origin:
+    For FastAPI: app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    For Express: app.use(cors())
+    For Go/Gin: r.Use(cors.Default())
+  - Return proper error responses with a "detail" field:
+    For FastAPI: raise HTTPException(status_code=400, detail="specific error message")
+    For Express: res.status(400).json({{ detail: "specific error message" }})
+  - Validate all input data before processing
+  - Use the EXACT same field names in responses as defined in the API contracts
+  - NEVER change response field names from what the data contracts specify
+  - LOGIC OWNERSHIP (CRITICAL): ALL business logic, game logic, domain logic, AI/bot logic,
+    rule enforcement, validation, and computation MUST be implemented HERE in the backend.
+    The frontend will ONLY send user actions and display results.
+    Every endpoint must do the actual work, not just pass through data.
+  - NO STUBS: Every route handler and every helper function must be FULLY implemented.
+    No empty functions, no TODO comments, no placeholder returns.
+    Every endpoint must return real, computed data."""
+
     prompt = f"""Implement the file: {path}
 
 Purpose: {purpose}
@@ -320,10 +527,30 @@ Complete implementation for {path}. Output ONLY the code, no fences, no explanat
 
 RULES:
   1. Use EXACT imports from skeletons
-  2. Full implementation, no placeholders
+  2. Full implementation — NO placeholders, NO stubs, NO TODO comments, NO empty function bodies.
+     Every function must contain real, working logic. "pass" or "..." as a function body is FORBIDDEN.
+     If you write a function, it MUST do real work. No "# implement later" comments.
   3. Follow language idioms
   4. Handle errors properly
-  5. Add brief comments for complex logic{exports_hint}{entry_point_rule}"""
+  5. Add brief comments for complex logic
+  6. JAVASCRIPT SPECIFIC:
+     - If this file interacts with the DOM, include an init() function
+     - At the end of the file, add the DOMContentLoaded pattern:
+       if (document.readyState === 'loading') {{
+         document.addEventListener('DOMContentLoaded', init);
+       }} else {{
+         init();
+       }}
+     - If making API calls, ALWAYS define: const API_BASE_URL = 'http://localhost:8000';
+     - NEVER use relative URLs like fetch('/api/...') — always use fetch(`${{API_BASE_URL}}/api/...`)
+  7. PYTHON BACKEND SPECIFIC:
+     - If using FastAPI, ALWAYS include CORS middleware:
+       from fastapi.middleware.cors import CORSMiddleware
+       app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+     - ALWAYS end with: if __name__ == "__main__": import uvicorn; uvicorn.run(app, host="127.0.0.1", port=8000)
+  8. EVERY function from the skeleton MUST be implemented with full logic.
+     Ask yourself: "If I run this code right now, will every function produce correct results?"
+     If not, keep implementing until it does.{exports_hint}{entry_point_rule}{fullstack_rules}"""
 
     system = f"Expert {language} developer. Output ONLY code, no markdown fences."
 

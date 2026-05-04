@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 
-from skills.builder.engine.context import blog, llm_call, strip_fences
+from skills.builder.engine.context import blog, llm_call, strip_fences, _meaningful_lines
 from skills.builder.engine.error_analysis import analyze_errors
 
 
@@ -64,6 +64,26 @@ def smart_repair_prompt(
             f"  - {h}" for h in analysis["hints"][:5]
         )
 
+    # System 4: KB solution lookup for similar past errors
+    kb_section = ""
+    try:
+        from skills.builder.engine.knowledge_base import get_knowledge_base
+        kb = get_knowledge_base()
+        if kb.available:
+            error_text = " ".join(errors[:5])
+            solutions = kb.retrieve_solutions_for_error(error_text, language=language, n_results=3)
+            worked_solutions = [s for s in solutions if s.get("worked")]
+            if worked_solutions:
+                sol_lines = [
+                    f"  - {s['solution'][:150]}" for s in worked_solutions[:3]
+                ]
+                kb_section = (
+                    "\n\nKNOWN SOLUTIONS FOR SIMILAR ERRORS (from past builds):\n"
+                    + "\n".join(sol_lines)
+                )
+    except Exception:
+        pass  # KB is optional — fail silently
+
     related_section = ""
     if written_files:
         related = _find_related_files(file_path, code, written_files, language)
@@ -86,6 +106,7 @@ ERRORS:
 ERROR TYPE: {analysis['category']}
 {analysis['llm_hint']}
 {hints_section}
+{kb_section}
 {related_section}
 
 CURRENT CODE:
@@ -175,11 +196,16 @@ RULES:
             temperature=0.05,
         )
         patched = strip_fences(response)
-        # Safety: Patch must not be drastically smaller than original
-        if len(patched) >= len(current_code) * 0.75:
+        # Safety: Patch must not drastically reduce meaningful content (Fix 6)
+        original_lines = _meaningful_lines(current_code)
+        fixed_lines = _meaningful_lines(patched)
+        if original_lines == 0 or fixed_lines >= original_lines * 0.75:
             return patched
         else:
-            blog.warning(f"Patch für {file_path} zu klein ({len(patched)} vs {len(current_code)}), behalte Original")
+            blog.warning(
+                f"Patch für {file_path} zu wenig Inhalt "
+                f"({fixed_lines} vs {original_lines} meaningful lines), behalte Original"
+            )
             return current_code
     except Exception as exc:
         blog.warning(f"Patch-Repair fehlgeschlagen: {exc}")

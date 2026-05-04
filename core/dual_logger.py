@@ -172,7 +172,7 @@ class BuildLogger:
 
     def approval_needed(self, language: str, framework: str, why: str,
                         files_total: int, file_paths: list, complexity: str = "",
-                        architecture_decisions: list = None):
+                        architecture_decisions: list = None, build_token: str = ""):
         """Signal that the tech stack + plan needs user approval before continuing."""
         self._emit({
             "type": "approval_needed",
@@ -183,6 +183,7 @@ class BuildLogger:
             "files": file_paths,
             "complexity": complexity,
             "architecture_decisions": architecture_decisions or [],
+            "build_token": build_token,
         })
 
     # ------------------------------------------------------------------

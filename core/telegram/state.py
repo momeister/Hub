@@ -14,6 +14,7 @@ user_sessions: dict[int, dict] = {}
 active_build: Optional[int] = None
 active_build_proc: Optional[subprocess.Popen] = None
 build_signal_path: Optional[str] = None
+build_token: str = ""
 
 dispatcher_alive: threading.Event = threading.Event()
 dispatcher_alive.set()

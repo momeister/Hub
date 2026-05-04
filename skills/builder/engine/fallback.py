@@ -6,6 +6,7 @@ skills/builder/engine/fallback.py - Fallback blueprints
 from __future__ import annotations
 
 from skills.builder.engine.utils import generate_project_name
+from skills.builder.engine.context import blog
 
 FALLBACK_FILES = {
     "python": [
@@ -67,6 +68,20 @@ def detect_fallback_language(goal: str) -> str:
 
 def make_fallback_blueprint(goal: str, language: str) -> dict:
     """Create a complete fallback blueprint for a given language."""
+    # Warn if the goal looks like a full-stack project
+    goal_lower = goal.lower()
+    fullstack_keywords = [
+        "backend", "frontend", "api", "server", "client",
+        "full-stack", "fullstack", "full stack", "rest", "endpoint",
+        "database", "web app", "web application",
+    ]
+    if any(kw in goal_lower for kw in fullstack_keywords):
+        blog.warning(
+            "WARNUNG: Blueprint-Generierung fehlgeschlagen für ein Full-Stack-Projekt. "
+            "Der Fallback erstellt nur ein Single-Language-Projekt. "
+            "Bitte den Build mit einem präziseren Prompt neu starten."
+        )
+
     files = FALLBACK_FILES.get(language, FALLBACK_FILES["python"])
     return {
         "project_name": generate_project_name(goal),

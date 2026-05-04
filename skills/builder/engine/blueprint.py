@@ -53,6 +53,7 @@ def _validate_and_normalize_blueprint(raw: object, goal: str) -> dict:
     blueprint.setdefault("safe_stack_violations", [])
     blueprint.setdefault("estimated_complexity", "medium")
     blueprint.setdefault("subprojects", [])
+    blueprint.setdefault("api_endpoints", [])
 
     if not isinstance(blueprint["dependencies"], dict):
         blueprint["dependencies"] = {"type": "none", "content": ""}
@@ -142,6 +143,15 @@ LANGUAGE SELECTION GUIDE (choose objectively, NO bias):
   - Systems programming: c, c++, rust
   - Automation/scripting: python, go
 
+COMPLEXITY DECISION (evaluate this BEFORE choosing is_multi_language):
+  - A "bot" or "AI opponent" in a game does NOT require a backend. It can run in-browser (JS Minimax, chess.js, etc.)
+  - A "database" or "persistence" only requires a backend if data must survive page refresh AND be shared across users.
+  - Set is_multi_language=true ONLY IF the project genuinely requires:
+    (a) server-side computation that cannot run in a browser, OR
+    (b) persistent storage shared across multiple users/sessions, OR
+    (c) the user EXPLICITLY asks for a separate backend API.
+  - If in doubt: build Single-Language first. A self-contained HTML+JS project that works is better than a broken Full-Stack project.
+
 ANTI-PATTERNS - DO NOT:
   - Pick obscure or experimental frameworks (no Dioxus, Yew, Leptos for simple projects)
   - Pick a language that doesn't match the domain (no Rust for a simple script, no C++ for a web API)
@@ -155,6 +165,28 @@ WHEN IN DOUBT: choose the MOST COMMON, MOST POPULAR option for the domain.
   Examples: Python for scripts/CLI, HTML+JS for browser apps, Go or Python for web APIs,
   React+TypeScript for complex web frontends, HTML+JS+Canvas for simple browser games.
 
+FULL-STACK PROJECT RULES (when project requires BOTH frontend AND backend):
+  - Set is_multi_language=true with separate subprojects for frontend and backend
+  - Define ALL API endpoints explicitly in the "api_endpoints" field (see schema below)
+  - Every endpoint MUST specify: exact URL path, HTTP method, request body, response body
+  - Use CONSISTENT parameter names everywhere (e.g. game_id in URL, request, AND response — not game_id in backend and gameId in frontend)
+  - Backend MUST include CORS middleware/headers to allow the frontend origin
+  - Specify exact ports (e.g. backend: 8000, frontend: 3000)
+  - If backend returns a specialized format (FEN, UCI, etc.), plan a data transformation utility in the frontend
+  - Frontend MUST have: error handling for API calls, loading states, user-friendly error messages
+  - Backend MUST have: input validation, proper error responses with "detail" field, CORS headers
+  - Include a proxy/CORS configuration note in architecture_decisions
+  - CRITICAL: The #1 cause of blank-screen bugs in generated full-stack apps is frontend calling wrong endpoints
+    or expecting wrong data formats. Be EXPLICIT about every endpoint URL and every response shape.
+  - LOGIC SEPARATION (CRITICAL):
+    * ALL business logic, game logic, AI/bot logic, rule enforcement, validation, and computation
+      MUST be planned as backend files ONLY
+    * The frontend must NOT contain any files that duplicate backend computation
+    * Frontend files should ONLY handle: API calls, UI rendering, event handling, and data format conversion
+    * Example: For a chess game, move validation and bot logic are BACKEND files.
+      The frontend only sends moves to the backend API and displays the result.
+    * In the file plan, clearly mark each file's responsibility (API layer, UI, or backend logic)
+
 RULES:
   1. If user mentions language explicitly, use it
   2. If user mentions "browser" or "web", use HTML+JavaScript (or TypeScript for complex apps)
@@ -167,6 +199,11 @@ RULES:
   9. Each file's "purpose" must be specific and actionable, NOT vague
   10. For Python web backends, the entry point MUST include uvicorn/flask startup code
   11. ONLY use packages that ACTUALLY EXIST on PyPI/npm/crates.io - do NOT hallucinate package names
+  12. For full-stack projects with is_multi_language=true:
+      - File paths in each subproject must be RELATIVE to the subproject root
+      - Use "main.py" NOT "backend/main.py" in the files list
+      - The subproject directory is created automatically — nesting it in the path creates duplicates
+      - Example: files for the backend subproject should be ["main.py", "routes.py"] not ["backend/main.py", "backend/routes.py"]
 
 OUTPUT: A single JSON object with this exact schema:
 """ + """{
@@ -203,6 +240,15 @@ OUTPUT: A single JSON object with this exact schema:
       "name": "<backend|frontend|etc>",
       "language": "<language>",
       "framework": "<framework>"
+    }
+  ],
+  "api_endpoints": [
+    {
+      "method": "GET|POST|PUT|DELETE",
+      "path": "/exact/url/path",
+      "request_body": {"field": "type"},
+      "response_body": {"field": "type"},
+      "description": "what this endpoint does"
     }
   ]
 }
@@ -289,6 +335,20 @@ RULES:
 - For CLI tools: define config objects, data pipeline structures
 - If no shared structures exist (e.g. single-file script), return empty contracts
 
+FULL-STACK API CONTRACTS (CRITICAL — for projects with both frontend and backend):
+- Define an API ENDPOINT CONTRACT for EVERY endpoint:
+  - Exact URL path and HTTP method (e.g. "POST /games", "GET /games/{{game_id}}")
+  - Request body structure with field names and types
+  - Response body structure with field names and types
+  - Error response structure (e.g. {{"detail": "error message"}})
+  - Data transformations needed (e.g. backend sends FEN string, frontend needs 2D array)
+- CRITICAL: Frontend API calls MUST use the EXACT same URLs and field names as the backend routes
+  - If backend defines route "/games/{{game_id}}/move", frontend MUST call "/games/${{gameId}}/move"
+  - If backend returns {{"board_fen": "..."}}, frontend MUST read response.board_fen (NOT response.board)
+- Include transformation contracts when data formats differ between frontend and backend
+  - Example: fenToBoard(fen: string) -> string[][] for converting FEN to renderable board
+  - Example: coordsToUCI(from: [row,col], to: [row,col]) -> string for move notation
+
 Output ONLY this JSON:
 {{
   "contracts": [
@@ -323,6 +383,26 @@ For a FastAPI backend (Python):
   "example": "TaskModel(id=1, title='Buy milk', done=False, created_at=datetime(2024,1,1))",
   "produced_by": ["models.py"],
   "consumed_by": ["routes.py", "database.py"]
+}}
+
+For a full-stack API endpoint contract:
+{{
+  "name": "API:POST /games",
+  "description": "Create a new game - endpoint contract between frontend and backend",
+  "structure": "Request: {{}} (empty body) | Response: {{game_id: string, board_fen: string, turn: string, status: string}}",
+  "example": "fetch('/games', {{method: 'POST'}}).then(r => r.json()) => {{game_id: 'abc123', board_fen: 'rnbqkbnr/...', turn: 'white', status: 'active'}}",
+  "produced_by": ["backend/routes.py"],
+  "consumed_by": ["frontend/api.js", "frontend/app.js"]
+}}
+
+For a data transformation utility:
+{{
+  "name": "fenToBoard",
+  "description": "Converts FEN string from backend to 2D array for frontend rendering",
+  "structure": "input: string (FEN notation) -> output: (string|null)[][] (8x8 board array)",
+  "example": "fenToBoard('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR') => [['r','n','b',...], ...]",
+  "produced_by": ["frontend/utils.js"],
+  "consumed_by": ["frontend/board.js", "frontend/app.js"]
 }}
 
 Output ONLY the JSON object. No explanation."""

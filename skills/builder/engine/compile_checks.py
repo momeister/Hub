@@ -213,6 +213,105 @@ def html_smoke_test(output_dir: str) -> tuple[bool, str]:
             except Exception:
                 pass
 
+    # --- Check: DOM ID consistency ---
+    # Verify that IDs referenced via getElementById in JS actually exist in the HTML
+    # Checks BOTH linked JS files AND inline <script> blocks
+    for html_path in html_files:
+        try:
+            content = open(html_path, encoding="utf-8").read()
+        except Exception:
+            continue
+
+        html_dir = os.path.dirname(html_path)
+
+        # IDs defined in the HTML
+        html_ids = set(re.findall(r'\bid=["\']([^"\']+)["\']', content, re.IGNORECASE))
+
+        # Collect all JS sources: (label, js_content) pairs
+        all_js_sources: list[tuple[str, str]] = []
+
+        # Linked JS files
+        for src in re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE):
+            if src.startswith(("http://", "https://", "//")):
+                continue
+            js_path = os.path.normpath(os.path.join(html_dir, src))
+            if not os.path.exists(js_path):
+                continue
+            try:
+                all_js_sources.append((os.path.basename(js_path), open(js_path, encoding="utf-8").read()))
+            except Exception:
+                continue
+
+        # Inline <script> blocks (without src attribute)
+        for m in re.finditer(r'<script(?![^>]*\bsrc\b)[^>]*>(.*?)</script>', content, re.DOTALL | re.IGNORECASE):
+            inline_body = m.group(1).strip()
+            if inline_body:
+                all_js_sources.append((f"{os.path.basename(html_path)} (inline)", inline_body))
+
+        # IDs referenced via getElementById in any JS source
+        js_get_ids = set()
+        for _label, js_content in all_js_sources:
+            js_get_ids.update(
+                re.findall(r'getElementById\(["\']([^"\']+)["\']\)', js_content)
+            )
+
+        missing_ids = js_get_ids - html_ids
+        if missing_ids:
+            errors.append(
+                f"DOM ID mismatch in {os.path.basename(html_path)}: "
+                f"JS calls getElementById({missing_ids}) "
+                f"but HTML only defines ids: {html_ids or '(none)'}"
+            )
+
+    # --- Check: DOMContentLoaded guard ---
+    # JS that manipulates DOM should wait for DOMContentLoaded
+    # Checks BOTH linked JS files AND inline <script> blocks
+    for html_path in html_files:
+        try:
+            content = open(html_path, encoding="utf-8").read()
+        except Exception:
+            continue
+
+        html_dir = os.path.dirname(html_path)
+
+        # Collect JS sources with labels
+        js_sources_for_guard: list[tuple[str, str]] = []
+
+        for src in re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE):
+            if src.startswith(("http://", "https://", "//")):
+                continue
+            js_path = os.path.normpath(os.path.join(html_dir, src))
+            if not os.path.exists(js_path):
+                continue
+            try:
+                js_sources_for_guard.append((os.path.basename(js_path), open(js_path, encoding="utf-8").read()))
+            except Exception:
+                continue
+
+        # Inline <script> blocks
+        for m in re.finditer(r'<script(?![^>]*\bsrc\b)[^>]*>(.*?)</script>', content, re.DOTALL | re.IGNORECASE):
+            inline_body = m.group(1).strip()
+            if inline_body:
+                js_sources_for_guard.append((f"{os.path.basename(html_path)} (inline)", inline_body))
+
+        for label, js_content in js_sources_for_guard:
+            has_dom_guard = (
+                "DOMContentLoaded" in js_content
+                or "window.onload" in js_content
+                or "document.addEventListener" in js_content
+                or js_content.strip().startswith("(function")
+            )
+            has_dom_manipulation = any(kw in js_content for kw in [
+                "getElementById", "querySelector", "querySelectorAll",
+                "innerHTML", "appendChild", "createElement", "getContext",
+            ])
+
+            if has_dom_manipulation and not has_dom_guard:
+                errors.append(
+                    f"{label}: DOM manipulation without DOMContentLoaded guard "
+                    f"— script runs before HTML elements exist"
+                )
+
     if errors:
         return False, "\n".join(errors)
     return True, ""

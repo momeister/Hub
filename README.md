@@ -6,7 +6,7 @@ local LLMs (Ollama) with a 5-agent pipeline architecture.
 
 ## Hardware Requirements
 
-Tested and optimized for:
+Tested for:
 - **GPU**: NVIDIA RTX 5070 Ti (12GB VRAM) or similar
 - **RAM**: 64GB system memory
 - **OS**: Windows 10/11

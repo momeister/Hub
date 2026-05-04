@@ -21,6 +21,7 @@ import time
 from skills.builder.engine.context import (
     blog, llm_call, clean_json, strip_fences, write_file,
     validate_blueprint, DEFAULT_CTX_TOKENS, MAX_REPAIR_ATTEMPTS, MAX_SANDBOX_RETRIES,
+    _code_hash,
 )
 from skills.builder.engine.blueprint import architect_phase
 from skills.builder.engine.compile_checks import compile_check
@@ -32,6 +33,7 @@ from skills.builder.engine.repair import repair_file, patch_repair_file
 from skills.builder.engine.error_analysis import analyze_errors
 from skills.builder.engine.sandbox import sandbox_test
 from skills.builder.engine.skeletons import generate_all_skeletons, fill_in_file, _generate_single_skeleton
+from skills.builder.engine.utils import sanitize_skeleton_paths
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +55,8 @@ def _ensure_python_entry_points(output_dir: str, written_files: dict) -> None:
 
         try:
             content = open(fpath, "r", encoding="utf-8").read()
-        except Exception:
+        except Exception as _e:
+            blog.warning(f"[non-critical] Could not read {fpath}: {_e}")
             continue
 
         # Check if the file uses a web framework
@@ -111,6 +114,145 @@ def _ensure_python_entry_points(output_dir: str, written_files: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Helper: ensure JavaScript files have DOMContentLoaded init pattern
+# ---------------------------------------------------------------------------
+def _ensure_js_init_pattern(output_dir: str, written_files: dict) -> None:
+    """Ensure main JavaScript files have DOMContentLoaded + init() pattern.
+
+    Scans JS files for DOM manipulation. If a file has DOM interactions but
+    no DOMContentLoaded/readyState check, and it defines an init() function,
+    appends the standard init pattern.
+    """
+    import re as _re
+
+    for fpath, content in list(written_files.items()):
+        if not fpath.endswith(('.js', '.mjs')):
+            continue
+
+        full_path = os.path.join(output_dir, fpath)
+        if not os.path.exists(full_path):
+            continue
+
+        # Skip utility/module files that don't touch the DOM
+        if any(kw in fpath.lower() for kw in ['utils', 'helpers', 'api', 'config', 'constants', 'lib/']):
+            continue
+
+        # Check if this file has DOM manipulation (indicates it's a main/app file)
+        has_dom = any(kw in content for kw in [
+            'document.getElementById', 'document.querySelector',
+            'addEventListener', 'innerHTML', 'textContent',
+            'appendChild', 'createElement',
+        ])
+        if not has_dom:
+            continue
+
+        # Already has init pattern — skip
+        has_init_pattern = (
+            'DOMContentLoaded' in content
+            or 'document.readyState' in content
+            or 'window.onload' in content
+            or 'window.addEventListener("load"' in content
+            or "window.addEventListener('load'" in content
+        )
+        if has_init_pattern:
+            continue
+
+        # Check if there's an init() function defined
+        has_init_fn = bool(_re.search(r'function\s+init\s*\(', content))
+        if not has_init_fn:
+            continue
+
+        # Append DOMContentLoaded init pattern
+        block = (
+            "\n\n// Initialize when DOM is ready\n"
+            "if (document.readyState === 'loading') {\n"
+            "    document.addEventListener('DOMContentLoaded', init);\n"
+            "} else {\n"
+            "    init();\n"
+            "}\n"
+        )
+        content += block
+        try:
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            written_files[fpath] = content
+            blog.info(f"Added DOMContentLoaded init pattern to {fpath}")
+        except OSError as exc:
+            blog.warning(f"Could not write init pattern to {fpath}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Helper: ensure frontend JS files use API_BASE_URL for API calls
+# ---------------------------------------------------------------------------
+def _ensure_frontend_api_base_url(output_dir: str, written_files: dict, blueprint: dict) -> None:
+    """Ensure frontend JavaScript files define and use API_BASE_URL.
+
+    Scans frontend JS files for fetch() calls with relative URLs (e.g. fetch('/api/...'))
+    and injects a const API_BASE_URL if missing.
+    """
+    import re as _re
+
+    api_endpoints = blueprint.get("api_endpoints", [])
+    if not api_endpoints:
+        return
+
+    for fpath, content in list(written_files.items()):
+        if not fpath.endswith(('.js', '.mjs', '.ts', '.jsx', '.tsx')):
+            continue
+
+        full_path = os.path.join(output_dir, fpath)
+        if not os.path.exists(full_path):
+            continue
+
+        # Only check frontend-ish files
+        is_frontend = any(kw in fpath.lower() for kw in [
+            'frontend/', 'client/', 'public/',
+            'api.js', 'api.ts', 'app.js', 'app.ts',
+        ]) or fpath.endswith(('.html', '.jsx', '.tsx', '.vue', '.svelte'))
+
+        # Also consider files NOT in backend/ as potential frontend
+        is_backend = any(kw in fpath.lower() for kw in [
+            'backend/', 'server/', 'routes', 'middleware',
+        ])
+
+        if not is_frontend and is_backend:
+            continue
+
+        # Check for fetch calls with relative URLs but no base URL constant
+        has_relative_fetch = bool(_re.search(r"""fetch\s*\(\s*['"`]/""", content))
+        has_base_url = any(kw in content for kw in [
+            'API_BASE_URL', 'API_URL', 'BASE_URL', 'baseURL', 'baseUrl',
+            'http://localhost:', 'http://127.0.0.1:',
+        ])
+
+        if has_relative_fetch and not has_base_url:
+            # Inject API_BASE_URL constant at the top of the file
+            base_url_line = "const API_BASE_URL = 'http://localhost:8000';\n\n"
+            content = base_url_line + content
+
+            # Replace relative fetch URLs with API_BASE_URL prefix
+            content = _re.sub(
+                r"""fetch\s*\(\s*(['"`])/""",
+                r"fetch(\1${API_BASE_URL}/",
+                content,
+            )
+            # Fix: convert simple quotes to template literals for interpolation
+            content = _re.sub(
+                r"""fetch\((['"])\$\{API_BASE_URL\}(/[^'"]+)\1""",
+                r"fetch(`${API_BASE_URL}\2`",
+                content,
+            )
+
+            try:
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                written_files[fpath] = content
+                blog.info(f"Added API_BASE_URL to {fpath}")
+            except OSError as exc:
+                blog.warning(f"Could not write API_BASE_URL to {fpath}: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Workspace: shared state passed between agents
 # ---------------------------------------------------------------------------
 def make_workspace(
@@ -138,6 +280,14 @@ def make_workspace(
         "errors": [],
         "phase": "init",
         "start_time": time.time(),
+        # --- Systems 1-4 extensions ---
+        "openapi_spec": {},           # OpenAPI 3.0 Spec (System 1)
+        "contract_violations": [],    # Contract violations found (System 2)
+        "symbol_table": {},           # AST symbol table (System 2)
+        "kg_context": {},             # KG query result (System 3)
+        "kb_context": "",             # KB context for Planner (System 4)
+        "all_errors": [],             # All errors (for record_build_result)
+        "all_repairs": [],            # All repairs (for record_build_result)
     }
 
 
@@ -152,7 +302,23 @@ def agent_planner(ws: dict) -> dict:
     blog.phase("agent_planner", "Agent 1/5: PLANNER - Designing architecture", model=ws["manager_model"])
     ws["phase"] = "planner"
 
-    blueprint = architect_phase(ws["goal"], ws["manager_model"])
+    # System 3+4: Enrich goal with KG/KB context if available
+    enriched_goal = ws["goal"]
+    kg_summary = ""
+    if ws.get("kg_context") and ws["kg_context"].get("summary_for_prompt"):
+        kg_summary = ws["kg_context"]["summary_for_prompt"]
+    kb_ctx = ws.get("kb_context", "")
+
+    if kg_summary or kb_ctx:
+        context_parts = [enriched_goal]
+        if kg_summary:
+            context_parts.append(f"\n\n{kg_summary}")
+        if kb_ctx:
+            context_parts.append(f"\n\n{kb_ctx}")
+        enriched_goal = "\n".join(context_parts)
+        blog.info("Planner context enriched with KG/KB data")
+
+    blueprint = architect_phase(enriched_goal, ws["manager_model"])
     # Store the goal in the blueprint so coder agents have access to it
     blueprint["_goal"] = ws["goal"]
 
@@ -387,10 +553,12 @@ def _generate_manifest_from_blueprint(
     seed = FRAMEWORK_SEEDS.get(framework, "")
 
     if dep_type == "requirements_txt":
-        # Known safe additions derived from file purposes
+        # Known safe additions derived from file purposes AND project goal
         files_text = " ".join(f.get("purpose", "") for f in blueprint.get("files", []))
+        scan_text = (files_text + " " + goal).lower()
         additions = []
         KNOWN_SAFE = {
+            # Generic / common
             "sqlalchemy": "sqlalchemy>=2.0",
             "sqlite":     "# sqlite3 is stdlib",
             "jwt":        "python-jose[cryptography]>=3.3",
@@ -405,23 +573,78 @@ def _generate_manifest_from_blueprint(
             "matplotlib": "matplotlib>=3.7",
             "pytest":     "pytest>=7.4",
             "dotenv":     "python-dotenv>=1.0",
+            # Domain-specific libraries
+            "chess":      "python-chess>=1.999",
+            "pygame":     "pygame>=2.5",
+            "pillow":     "Pillow>=10.0",
+            "pil":        "Pillow>=10.0",
+            "image":      "Pillow>=10.0",
+            "opencv":     "opencv-python>=4.8",
+            "cv2":        "opencv-python>=4.8",
+            "scikit-learn": "scikit-learn>=1.3",
+            "sklearn":    "scikit-learn>=1.3",
+            "nltk":       "nltk>=3.8",
+            "spacy":      "spacy>=3.6",
+            "boto3":      "boto3>=1.28",
+            "aws":        "boto3>=1.28",
+            "selenium":   "selenium>=4.11",
+            "beautifulsoup": "beautifulsoup4>=4.12",
+            "scrapy":     "scrapy>=2.10",
+            "tensorflow": "tensorflow>=2.13",
+            "torch":      "torch>=2.0",
+            "pytorch":    "torch>=2.0",
+            "transformers": "transformers>=4.30",
+            "websocket":  "websockets>=11.0",
+            "cryptography": "cryptography>=41.0",
+            "paramiko":   "paramiko>=3.3",
+            "yaml":       "pyyaml>=6.0",
+            "toml":       "tomli>=2.0",
+            "click":      "click>=8.1",
+            "typer":      "typer>=0.9",
+            "rich":       "rich>=13.0",
+            "colorama":   "colorama>=0.4",
+            "jinja":      "Jinja2>=3.1",
+            "sympy":      "sympy>=1.12",
+            "scipy":      "scipy>=1.11",
+            "networkx":   "networkx>=3.1",
+            "plotly":     "plotly>=5.15",
+            "seaborn":    "seaborn>=0.12",
+            "streamlit":  "streamlit>=1.25",
+            "gradio":     "gradio>=3.40",
+            "discord":    "discord.py>=2.3",
+            "telegram":   "python-telegram-bot>=20.4",
+            "tweepy":     "tweepy>=4.14",
+            "stripe":     "stripe>=5.5",
+            "openai":     "openai>=1.0",
+            "langchain":  "langchain>=0.1",
+            "chromadb":   "chromadb>=0.4",
+            "pymongo":    "pymongo>=4.5",
+            "psycopg":    "psycopg2-binary>=2.9",
+            "mysql":      "mysql-connector-python>=8.1",
         }
         for keyword, pkg_line in KNOWN_SAFE.items():
-            if keyword in files_text.lower() and pkg_line not in (seed or ""):
+            if keyword in scan_text and pkg_line not in (seed or ""):
                 if not pkg_line.startswith("#"):
-                    additions.append(pkg_line)
+                    # Avoid duplicate package names
+                    pkg_name = pkg_line.split(">=")[0].split(">=")[0].strip()
+                    if not any(pkg_name in a for a in additions):
+                        additions.append(pkg_line)
 
         base_content = (seed or "") + "\n".join(additions)
 
-        # LLM only for gaps, if really needed
-        if not base_content.strip():
+        # LLM fallback: trigger if no content at all, or if very few packages
+        # were found (< 2) — the goal may reference libraries not in KNOWN_SAFE
+        non_comment_pkgs = [a for a in additions if not a.startswith("#")]
+        if not base_content.strip() or len(non_comment_pkgs) < 2:
             prompt = (
                 f"Generate a minimal requirements.txt for a Python {framework or 'script'} project.\n"
-                f"Goal: {goal[:200]}\n\n"
+                f"Goal: {goal}\n"
+                f"Already included: {', '.join(additions) if additions else 'none'}\n\n"
                 "STRICT RULES:\n"
                 "- ONLY include packages you are 100% certain exist on PyPI\n"
-                "- Maximum 5 packages\n"
+                "- Maximum 8 packages\n"
                 "- Prefer stdlib over external packages\n"
+                "- Include ALL domain-specific libraries the goal requires\n"
                 "- Output ONLY the requirements.txt content, no explanation\n"
             )
             try:
@@ -432,10 +655,14 @@ def _generate_manifest_from_blueprint(
                     max_tokens=256,
                     temperature=0.0,
                 )
-                base_content = strip_fences(response).strip()
+                llm_content = strip_fences(response).strip()
+                # Merge LLM output with already-found packages
+                if base_content.strip() and llm_content:
+                    base_content = base_content.strip() + "\n" + llm_content
+                elif llm_content:
+                    base_content = llm_content
             except Exception as exc:
-                blog.warning(f"Manifest LLM fallback fehlgeschlagen: {exc}")
-                base_content = ""
+                blog.warning(f"Manifest LLM fallback failed: {exc}")
 
         if base_content.strip():
             manifest_path = os.path.join(output_dir, manifest_name)
@@ -648,6 +875,10 @@ def agent_coder(ws: dict) -> dict:
         blog.error("Skeleton generation failed after 2 attempts", severity="fatal")
         raise RuntimeError("Could not generate any file skeletons")
 
+    # Fix: Strip subproject name prefix from skeleton paths to prevent
+    # nested folders (e.g. output/backend/backend/main.py)
+    skeletons = sanitize_skeleton_paths(skeletons, blueprint)
+
     actual = len(skeletons)
     if actual < files_total:
         blog.warning(f"Only {actual}/{files_total} skeletons generated")
@@ -676,12 +907,30 @@ def agent_coder(ws: dict) -> dict:
 
     ws["skeletons"] = skeletons
 
+    # System 1: Load pre-written contract stubs into workspace and disk.
+    # These were generated deterministically from the OpenAPI spec and must
+    # NOT be regenerated by the Coder — only their business logic gets filled in.
+    _pre_written = blueprint.get("pre_written_files", {})
+    if _pre_written:
+        blog.info(f"Loading {len(_pre_written)} pre-written contract stub(s) into workspace")
+        for _stub_path, _stub_code in _pre_written.items():
+            _stub_full_path = os.path.join(output_dir, _stub_path)
+            write_file(_stub_full_path, _stub_code)
+            skeletons[_stub_path] = _stub_code
+
     # Phase 1.5: Validate manifest and install deps
     blog.phase("manifest_validation", "Validating manifest and installing dependencies")
     validate_manifest(output_dir, language, coder_model, skeletons)
 
     # Phase 2: Fill in each file
     written_files: dict[str, str] = {}
+
+    # System 1: Pre-populate written_files with contract stubs so the Coder
+    # treats them as already-implemented files (shows them as context,
+    # skips them in the generation loop).
+    for _stub_path, _stub_code in _pre_written.items():
+        written_files[_stub_path] = _stub_code
+
     file_index = 0
 
     for file_path in dep_order:
@@ -690,16 +939,42 @@ def agent_coder(ws: dict) -> dict:
             blog.warning(f"File {file_path} in dep order but not in plan, skipping")
             continue
 
+        # System 1: Skip files that are pre-written contract stubs.
+        # The Coder must not regenerate these — they are contract-enforced.
+        if file_path in blueprint.get("pre_written_files", {}):
+            blog.info(f"Skipping pre-written stub: {file_path}")
+            continue
+
         file_index += 1
         blog.file_start(file_path, file_index, files_total)
 
         code = fill_in_file(file_spec, skeletons, written_files, blueprint, coder_model, ctx_tokens)
+
+        # System 2: Contract verification against OpenAPI spec (NO LLM in verification)
+        if ws.get("openapi_spec") and file_path.endswith((".py", ".js", ".ts", ".jsx", ".tsx")):
+            try:
+                from skills.builder.engine.contract_verifier import run_contract_verification_loop
+                code = run_contract_verification_loop(
+                    ws, file_path, code,
+                    max_repair_attempts=2,
+                    llm_call_fn=llm_call,
+                    coder_model=coder_model,
+                )
+            except Exception as _cv_exc:
+                blog.warning(f"Contract verification skipped for {file_path}: {_cv_exc}")
 
         full_path = os.path.join(output_dir, file_path)
         write_file(full_path, code)
         written_files[file_path] = code
         skeletons[file_path] = code  # Fix 1: Replace skeleton with finished code for subsequent files
         blog.file_done(file_path, len(code))
+
+        # System 2: Update symbol table after each file
+        try:
+            from skills.builder.engine.contract_verifier import build_ast_symbol_table
+            ws["symbol_table"] = build_ast_symbol_table(written_files)
+        except Exception:
+            pass
 
         # Quick compile check on just-written file
         success, all_errors = compile_check(output_dir, language)
@@ -708,6 +983,12 @@ def agent_coder(ws: dict) -> dict:
 
         if not errors:
             continue
+
+        # Track errors for KG/KB recording (System 3+4)
+        for e in errors:
+            ws.setdefault("all_errors", []).append({
+                "type": "compile_error", "message": e, "file": file_path,
+            })
 
         blog.warning(f"Compile errors after {file_path}: {len(errors)}")
         for e in errors[:3]:
@@ -748,6 +1029,7 @@ def agent_coder(ws: dict) -> dict:
 
         max_repairs = MAX_REPAIR_ATTEMPTS.get(language, 3)
         repaired_ok = False
+        seen_hashes = set()  # Fix 3: stagnation detection
 
         for repair_attempt in range(1, max_repairs + 1):
             blog.repair(file_path, repair_attempt, max_repairs)
@@ -778,6 +1060,14 @@ def agent_coder(ws: dict) -> dict:
                 file_path, code, enriched_errors, language, coder_model,
                 written_files=written_files,
             )
+
+            # Fix 3: stagnation detection - abort if code hasn't changed
+            h = _code_hash(repaired)
+            if h in seen_hashes:
+                blog.warning(f"Repair für {file_path} stagniert nach {repair_attempt} Versuchen – abbrechen")
+                break
+            seen_hashes.add(h)
+
             write_file(full_path, repaired)
             written_files[file_path] = repaired
             skeletons[file_path] = repaired  # Fix 1: Also update skeletons during repair
@@ -789,6 +1079,12 @@ def agent_coder(ws: dict) -> dict:
             if not errors2:
                 blog.verify(True, "compile", f"{file_path} repaired")
                 repaired_ok = True
+                # Track repair for KG/KB (System 3+4)
+                ws.setdefault("all_repairs", []).append({
+                    "description": f"Repaired {file_path} on attempt {repair_attempt}",
+                    "file": file_path,
+                    "worked": True,
+                })
                 break
             errors = errors2
 
@@ -807,14 +1103,6 @@ def agent_coder(ws: dict) -> dict:
             write_file(full_path, fresh_code)
             written_files[file_path] = fresh_code
             format_code(output_dir, language)
-
-        # Fix 4: Intermediate coherence check every 4 files
-        if file_index % 4 == 0 and file_index > 0 and language in ("javascript", "typescript", "python"):
-            blog.info(f"Zwischen-Coherence-Check nach {file_index} Dateien...")
-            written_files = _validate_code_coherence(
-                output_dir, language, coder_model, ctx_tokens,
-                written_files, blueprint, skeletons,
-            )
 
     # Post-coder validation: ensure all planned files were actually generated
     planned_paths = {f["path"] for f in files_list}
@@ -905,12 +1193,14 @@ def agent_coder(ws: dict) -> dict:
     # CALLED but never DEFINED anywhere in the project.  This catches the
     # case where the coder references a skeleton function that was never
     # implemented (e.g., updateTurnIndicator called but not defined).
-    if language in ("javascript", "typescript") and written_files:
-        written_files = _validate_code_coherence(
-            output_dir, language, coder_model, ctx_tokens,
-            written_files, blueprint, skeletons,
+    # Skip for languages with a real compiler — it already catches undefined refs.
+    COMPILER_CHECKED_LANGUAGES = {"rust", "go", "typescript"}
+    if language in COMPILER_CHECKED_LANGUAGES:
+        blog.info(
+            f"Skipping coherence LLM check for {language} "
+            f"(compiler handles undefined reference detection)"
         )
-    elif language == "python" and written_files:
+    elif language in ("javascript", "python") and written_files:
         written_files = _validate_code_coherence(
             output_dir, language, coder_model, ctx_tokens,
             written_files, blueprint, skeletons,
@@ -1067,18 +1357,391 @@ RULES:
             )
             fixed_code = strip_fences(fix_response)
 
-            # Safety check: patched file shouldn't be drastically smaller
-            if len(fixed_code) >= len(current_code) * 0.7:
-                full_path = os.path.join(output_dir, target_file)
-                write_file(full_path, fixed_code)
-                written_files[target_file] = fixed_code
-                blog.info(f"Patched {target_file}: added {', '.join(missing_names)}")
-            else:
+            # Safety check 1: patched file shouldn't be drastically smaller
+            if len(fixed_code) < len(current_code) * 0.85:
                 blog.warning(f"Coherence fix for {target_file} was too small, skipping")
+                continue
+
+            # Safety check 2: ensure all existing function/class definitions survive
+            import re as _def_re
+            if language == "python":
+                existing_defs = set(_def_re.findall(r'(?:def|class)\s+(\w+)', current_code))
+            else:
+                existing_defs = set(_def_re.findall(r'(?:function|class)\s+(\w+)', current_code))
+            if existing_defs:
+                if language == "python":
+                    fixed_defs = set(_def_re.findall(r'(?:def|class)\s+(\w+)', fixed_code))
+                else:
+                    fixed_defs = set(_def_re.findall(r'(?:function|class)\s+(\w+)', fixed_code))
+                lost_defs = existing_defs - fixed_defs
+                if lost_defs:
+                    blog.warning(
+                        f"Coherence fix for {target_file} would lose definitions: "
+                        f"{', '.join(sorted(lost_defs))} — skipping"
+                    )
+                    continue
+
+            full_path = os.path.join(output_dir, target_file)
+            write_file(full_path, fixed_code)
+            written_files[target_file] = fixed_code
+            blog.info(f"Patched {target_file}: added {', '.join(missing_names)}")
         except Exception as exc:
             blog.warning(f"Coherence fix failed for {target_file}: {exc}")
 
     blog.verify(True, "coherence", f"Patched {len(fixes_by_file)} file(s) for undefined references")
+    return written_files
+
+
+# ---------------------------------------------------------------------------
+# Project Startup & Consistency Analysis
+# ---------------------------------------------------------------------------
+def _project_startup_analysis(
+    output_dir: str,
+    written_files: dict,
+    blueprint: dict,
+    language: str,
+    coder_model: str,
+    ctx_tokens: int,
+) -> dict:
+    """Comprehensive project startup and consistency analysis.
+
+    Runs static checks + LLM analysis to catch:
+    1. App initialization (init/initApp defined AND called)
+    2. External library loading order in HTML (<script> order)
+    3. Duplicate/contradictory implementations across files
+    4. index.html cleanliness (entry point only, no duplicate logic)
+    5. README consistency with actual project files
+    """
+    import re as _re
+    from collections import Counter
+
+    blog.phase("startup_analysis", "Project startup & consistency analysis", model=coder_model)
+    issues: list[str] = []
+    fixes_applied = 0
+
+    # ── Static Check 1: HTML script loading order ─────────────────────────
+    html_files = {p: c for p, c in written_files.items() if p.endswith(('.html', '.htm'))}
+    for html_path, html_content in html_files.items():
+        # Extract all <script src="..."> tags in order
+        script_srcs = _re.findall(
+            r'<script[^>]+src=["\']([^"\']+)["\']', html_content, _re.IGNORECASE
+        )
+        # Check that external CDN scripts come before local scripts
+        seen_local = False
+        for src in script_srcs:
+            is_external = src.startswith(('http://', 'https://', '//'))
+            if is_external and seen_local:
+                issues.append(
+                    f"[SCRIPT_ORDER] {html_path}: external library '{src}' loaded AFTER "
+                    f"local scripts — libraries must be loaded first"
+                )
+            if not is_external:
+                seen_local = True
+
+        # Check that referenced scripts actually exist
+        html_dir = os.path.dirname(html_path)
+        for src in script_srcs:
+            if src.startswith(('http://', 'https://', '//', 'data:')):
+                continue
+            ref_path = os.path.normpath(os.path.join(html_dir, src)).replace("\\", "/")
+            if ref_path not in written_files and not os.path.exists(os.path.join(output_dir, ref_path)):
+                issues.append(
+                    f"[MISSING_SCRIPT] {html_path}: references '{src}' but file does not exist"
+                )
+
+    # ── Static Check 2: Duplicate function definitions ────────────────────
+    if language in ("javascript", "html", "typescript"):
+        func_locations: dict[str, list[str]] = {}
+        for fpath, content in written_files.items():
+            if not fpath.endswith(('.js', '.mjs', '.jsx', '.ts', '.tsx')):
+                # Also check inline scripts in HTML
+                if fpath.endswith(('.html', '.htm')):
+                    # Extract inline script content
+                    inline_scripts = _re.findall(
+                        r'<script(?:\s[^>]*)?>(.+?)</script>',
+                        content, _re.DOTALL | _re.IGNORECASE,
+                    )
+                    inline_code = "\n".join(inline_scripts)
+                    if not inline_code.strip():
+                        continue
+                    for m in _re.finditer(r'function\s+(\w+)\s*\(', inline_code):
+                        fname = m.group(1)
+                        func_locations.setdefault(fname, []).append(f"{fpath} (inline)")
+                    continue
+                else:
+                    continue
+            for m in _re.finditer(r'function\s+(\w+)\s*\(', content):
+                fname = m.group(1)
+                func_locations.setdefault(fname, []).append(fpath)
+
+        for fname, locations in func_locations.items():
+            if len(locations) > 1:
+                issues.append(
+                    f"[DUPLICATE_FUNC] Function '{fname}' is defined in multiple places: "
+                    + ", ".join(locations)
+                )
+
+    # ── Static Check 3: index.html bloat (inline logic > 100 lines) ──────
+    index_html = written_files.get("index.html", "")
+    if index_html:
+        inline_scripts = _re.findall(
+            r'<script(?:\s[^>]*)?>(.+?)</script>',
+            index_html, _re.DOTALL | _re.IGNORECASE,
+        )
+        total_inline_lines = sum(s.count('\n') + 1 for s in inline_scripts if s.strip())
+        if total_inline_lines > 100:
+            issues.append(
+                f"[INDEX_BLOAT] index.html contains {total_inline_lines} lines of inline "
+                f"JavaScript — logic should be in separate .js files"
+            )
+
+    # ── Static Check 4: Init function defined but never called ────────────
+    if language in ("javascript", "html", "typescript"):
+        for fpath, content in written_files.items():
+            if not fpath.endswith(('.js', '.mjs')):
+                continue
+            # Check if init() is defined
+            has_init_def = bool(_re.search(r'function\s+init\s*\(', content))
+            if not has_init_def:
+                continue
+            # Check if init() is called anywhere
+            has_init_call = bool(_re.search(r'\binit\s*\(', content))
+            has_dom_ready = 'DOMContentLoaded' in content or 'readyState' in content
+            if not has_init_call and not has_dom_ready:
+                # Check if it's called from HTML
+                called_from_html = any(
+                    f'init()' in html_content or f'init(' in html_content
+                    for html_content in html_files.values()
+                )
+                if not called_from_html:
+                    issues.append(
+                        f"[INIT_NOT_CALLED] {fpath}: defines init() but never calls it — "
+                        f"app will not initialize"
+                    )
+
+    # ── Static Check 5: Python entry points without __main__ ──────────────
+    if language == "python":
+        for fpath, content in written_files.items():
+            if not fpath.endswith('.py'):
+                continue
+            uses_web = any(kw in content for kw in [
+                'FastAPI(', 'Flask(', 'Starlette(', 'uvicorn', 'app.run',
+            ])
+            if uses_web and 'if __name__' not in content:
+                issues.append(
+                    f"[NO_MAIN_BLOCK] {fpath}: Web app without if __name__ == '__main__' block"
+                )
+
+            # Check for CORS
+            uses_fastapi = 'FastAPI(' in content
+            has_cors = 'CORSMiddleware' in content or 'CORS(' in content
+            if uses_fastapi and not has_cors:
+                issues.append(
+                    f"[NO_CORS] {fpath}: FastAPI app without CORS middleware — "
+                    f"frontend requests will fail silently"
+                )
+
+    # ── Log static issues ─────────────────────────────────────────────────
+    if issues:
+        blog.warning(f"Startup analysis found {len(issues)} static issue(s):")
+        for issue in issues:
+            blog.warning(f"  {issue}")
+
+    # ── LLM-based deep analysis ──────────────────────────────────────────
+    code_parts = []
+    for fpath in sorted(written_files.keys()):
+        content = written_files[fpath]
+        preview = content[:3000] if len(content) > 3000 else content
+        code_parts.append(f"=== {fpath} ({len(content)} chars) ===\n{preview}")
+    all_code = "\n\n".join(code_parts)
+
+    max_chars = int(ctx_tokens * 2.0)
+    if len(all_code) > max_chars:
+        all_code = all_code[:max_chars] + "\n... (truncated)"
+
+    static_issues_text = ""
+    if issues:
+        static_issues_text = (
+            "\n\nSTATIC ISSUES ALREADY FOUND (verify these and add any others):\n"
+            + "\n".join(f"  - {i}" for i in issues)
+        )
+
+    analysis_prompt = f"""You are a senior code reviewer performing a STARTUP READINESS ANALYSIS.
+A {language} project was just generated for this goal:
+
+GOAL: "{blueprint.get('_goal', '')}"
+
+PROJECT FILES:
+{all_code}
+{static_issues_text}
+
+ANALYZE THE PROJECT FOR THESE SPECIFIC ISSUES:
+
+1. INITIALIZATION CHAIN: Is the app actually initialized?
+   - For JS: Is there an init()/initApp()/main() function that is DEFINED AND CALLED?
+   - For Python: Is there an if __name__ == "__main__" block?
+   - Are ALL event listeners properly connected?
+
+2. LIBRARY LOADING ORDER: In HTML files:
+   - Are external CDN libraries (Chess.js, jQuery, etc.) loaded BEFORE local scripts that use them?
+   - Are script tags in the correct dependency order?
+
+3. DUPLICATE LOGIC: Check for contradictions:
+   - Is the same logic implemented BOTH inline in index.html AND in separate .js files?
+   - Are there conflicting function definitions across files?
+   - Is there duplicate state management (e.g., game state in both app.js and index.html)?
+
+4. INDEX.HTML CLEANLINESS:
+   - Does index.html serve ONLY as entry point (structure + script loading)?
+   - Or does it contain substantial application logic that should be in .js files?
+
+5. CROSS-FILE CONSISTENCY:
+   - Do frontend API calls match backend endpoints?
+   - Are function signatures consistent between caller and definition?
+   - Are all imported modules/files actually present?
+
+For EACH issue found, specify:
+- The exact file(s) affected
+- What's wrong
+- The specific fix needed (be concrete: add line X, remove function Y, move code from A to B)
+
+Output ONLY this JSON:
+""" + """{
+  "startup_ready": true/false,
+  "issues": [
+    {
+      "file": "<primary file affected>",
+      "category": "<INIT_CHAIN|LIBRARY_ORDER|DUPLICATE_LOGIC|INDEX_BLOAT|CROSS_FILE>",
+      "problem": "<1-sentence description>",
+      "fix": "<concrete fix description>",
+      "severity": "<critical|warning>"
+    }
+  ]
+}
+
+If the project looks ready to start, return {"startup_ready": true, "issues": []}.
+Output ONLY JSON."""
+
+    llm_issues: list[dict] = []
+    try:
+        response = llm_call(
+            model=coder_model,
+            prompt=analysis_prompt,
+            system="Senior code reviewer. Analyze for startup readiness. Output ONLY valid JSON.",
+            max_tokens=4096,
+            temperature=0.05,
+        )
+        raw = json.loads(clean_json(response))
+        if isinstance(raw, dict):
+            llm_issues = raw.get("issues", [])
+            if raw.get("startup_ready", True) and not llm_issues:
+                blog.verify(True, "startup_analysis", "Project passes startup readiness check")
+    except Exception as exc:
+        blog.warning(f"LLM startup analysis failed ({exc}), relying on static checks only")
+
+    if not llm_issues and not issues:
+        blog.verify(True, "startup_analysis", "No startup issues found")
+        return written_files
+
+    # ── Auto-fix critical issues ──────────────────────────────────────────
+    critical_issues = [i for i in llm_issues if i.get("severity") == "critical"]
+
+    if critical_issues:
+        blog.warning(f"Found {len(critical_issues)} critical startup issue(s), attempting auto-fix")
+
+        for issue in critical_issues[:5]:
+            target_file = issue.get("file", "")
+            category = issue.get("category", "")
+            problem = issue.get("problem", "")
+            fix_desc = issue.get("fix", "")
+
+            if not target_file or target_file not in written_files:
+                # Try to match by basename
+                for fpath in written_files:
+                    if os.path.basename(fpath) == os.path.basename(target_file):
+                        target_file = fpath
+                        break
+                else:
+                    blog.warning(f"Cannot fix '{problem}': file '{target_file}' not found")
+                    continue
+
+            current_code = written_files[target_file]
+            blog.info(f"Auto-fixing [{category}] in {target_file}: {problem}")
+
+            # For DUPLICATE_LOGIC in index.html: strip inline scripts
+            if category == "DUPLICATE_LOGIC" and target_file.endswith(('.html', '.htm')):
+                # Remove large inline <script> blocks (keep small ones < 5 lines)
+                def _strip_large_inline_scripts(html: str) -> str:
+                    def _replace(m):
+                        script_body = m.group(1)
+                        if script_body.strip().count('\n') < 5:
+                            return m.group(0)  # Keep small scripts
+                        return ''  # Remove large inline scripts
+                    return _re.sub(
+                        r'<script(?:\s[^>]*)?>(.+?)</script>',
+                        _replace,
+                        html, flags=_re.DOTALL | _re.IGNORECASE,
+                    )
+
+                fixed_html = _strip_large_inline_scripts(current_code)
+                if fixed_html != current_code:
+                    full_path = os.path.join(output_dir, target_file)
+                    write_file(full_path, fixed_html)
+                    written_files[target_file] = fixed_html
+                    fixes_applied += 1
+                    blog.info(f"Stripped duplicate inline scripts from {target_file}")
+                continue
+
+            # For other issues: use LLM to apply the fix
+            fix_prompt = f"""Fix this issue in the file below.
+
+ISSUE: {problem}
+FIX NEEDED: {fix_desc}
+
+FILE: {target_file}
+
+CURRENT CODE:
+{current_code[:12000]}
+
+RULES:
+  1. Output the COMPLETE file with the fix applied
+  2. Do NOT break existing functionality
+  3. Do NOT remove working code unless it's duplicate/contradictory
+  4. Do NOT add new external dependencies
+  5. Output ONLY code, no markdown fences, no explanation"""
+
+            try:
+                fix_response = llm_call(
+                    model=coder_model,
+                    prompt=fix_prompt,
+                    system=f"Expert {language} developer. Apply the fix cleanly. Output ONLY code.",
+                    max_tokens=14336,
+                    temperature=0.1,
+                )
+                fixed_code = strip_fences(fix_response)
+
+                # Safety: don't accept drastically smaller files
+                if len(fixed_code) >= len(current_code) * 0.5:
+                    full_path = os.path.join(output_dir, target_file)
+                    write_file(full_path, fixed_code)
+                    written_files[target_file] = fixed_code
+                    fixes_applied += 1
+                    blog.info(f"Applied startup fix to {target_file}: {fix_desc[:80]}")
+                else:
+                    blog.warning(
+                        f"Fix for {target_file} shrank code too much "
+                        f"({len(fixed_code)} vs {len(current_code)}), skipping"
+                    )
+            except Exception as exc:
+                blog.warning(f"Auto-fix failed for {target_file}: {exc}")
+
+    total_issues = len(issues) + len(llm_issues)
+    blog.verify(
+        fixes_applied > 0 or total_issues == 0,
+        "startup_analysis",
+        f"Found {total_issues} issue(s), applied {fixes_applied} fix(es)"
+    )
+
     return written_files
 
 
@@ -1100,6 +1763,25 @@ def agent_executor(ws: dict) -> dict:
     # Ensure Python entry points have if __name__ == "__main__" block
     if language == "python":
         _ensure_python_entry_points(output_dir, ws.get("written_files", {}))
+
+    # Ensure JavaScript files have DOMContentLoaded init pattern
+    if language in ("javascript", "html", "typescript"):
+        _ensure_js_init_pattern(output_dir, ws.get("written_files", {}))
+
+    # Ensure frontend JS files use API_BASE_URL for API calls
+    if ws.get("blueprint"):
+        _ensure_frontend_api_base_url(output_dir, ws.get("written_files", {}), ws["blueprint"])
+
+    # Comprehensive startup & consistency analysis (static + LLM)
+    if ws.get("written_files") and ws.get("blueprint"):
+        ws["written_files"] = _project_startup_analysis(
+            output_dir=output_dir,
+            written_files=ws["written_files"],
+            blueprint=ws["blueprint"],
+            language=language,
+            coder_model=ws.get("coder_model", ws.get("manager_model", "")),
+            ctx_tokens=ws.get("ctx_tokens", DEFAULT_CTX_TOKENS),
+        )
 
     # Final compile check
     blog.phase("final_compile", "Final compilation check")
@@ -1184,6 +1866,54 @@ def agent_critic(ws: dict) -> dict:
     manager_model = ws["manager_model"]
     written_files = ws["written_files"]
 
+    # Compile-repair: fix compile errors even when sandbox passed (or was skipped)
+    if not ws.get("compile_ok", True) and written_files:
+        blog.phase("critic_compile_repair", "Critic: repairing remaining compile errors", model=coder_model)
+        compile_repair_ok = False
+        for compile_attempt in range(MAX_SANDBOX_RETRIES):
+            success, all_errors = compile_check(output_dir, language)
+            if success:
+                ws["compile_ok"] = True
+                compile_repair_ok = True
+                blog.verify(True, "critic_compile", f"Compile errors fixed on attempt {compile_attempt + 1}")
+                break
+
+            # Find the file with the most errors and repair it
+            from collections import Counter
+            file_error_counts: Counter = Counter()
+            for e in all_errors:
+                for fpath in written_files:
+                    fname = os.path.basename(fpath)
+                    if fname in e or fpath in e:
+                        file_error_counts[fpath] += 1
+                        break
+
+            if not file_error_counts:
+                blog.warning("Compile errors exist but cannot identify affected files")
+                break
+
+            worst_file = file_error_counts.most_common(1)[0][0]
+            file_errors = [e for e in all_errors if os.path.basename(worst_file) in e or worst_file in e]
+            code = written_files[worst_file]
+
+            blog.repair(worst_file, compile_attempt + 1, MAX_SANDBOX_RETRIES)
+
+            repaired = repair_file(
+                worst_file, code, file_errors, language, coder_model,
+                written_files=written_files,
+            ) if compile_attempt == 0 else patch_repair_file(
+                worst_file, code, file_errors, language, coder_model,
+                written_files=written_files,
+            )
+
+            full_path = os.path.join(output_dir, worst_file)
+            write_file(full_path, repaired)
+            written_files[worst_file] = repaired
+            format_code(output_dir, language)
+
+        if not compile_repair_ok:
+            blog.warning("Critic could not resolve all compile errors")
+
     # Self-correction loop if sandbox failed
     if not ws["sandbox_ok"] and written_files:
         sandbox_output = ws.get("sandbox_output", "")
@@ -1259,8 +1989,8 @@ Output ONLY this JSON:
                                     f"FIX STRATEGY: {diag.get('fix_strategy', '')}\n"
                                 )
                                 blog.info(f"Critic identified problem: {problem_file}")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        blog.warning(f"[non-critical] Diagnosis parse failed: {_e}")
 
                     if not problem_file:
                         # Fallback: find entry point
@@ -1318,7 +2048,13 @@ No explanation, no fences."""
                     blog.warning("Critic exhausted all repair attempts — project may have issues")
 
     # UX Polish phase (uses manager model for suggestions, coder for applying)
-    if written_files:
+    skip_polish = os.environ.get("BUILDER_SKIP_POLISH", "").lower() in ("1", "true", "yes")
+
+    if not ws["sandbox_ok"]:
+        blog.info("Skipping polish phase: build has unresolved errors")
+    elif skip_polish:
+        blog.info("Skipping polish phase: BUILDER_SKIP_POLISH=1")
+    elif written_files:
         blog.phase("critic_polish", "Critic: UX polish review", model=manager_model)
 
         file_summaries = []

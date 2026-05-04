@@ -51,6 +51,13 @@ Think about:
   - Visual polish (colors, formatting, layout)
   - Missing standard features (pause in games, exit option, keyboard shortcuts)
   - Accessibility (clear labels, tooltips, contrast)
+  - For full-stack projects (frontend + backend), also consider:
+    * Missing error handling in frontend API calls (try-catch with user-friendly messages)
+    * Missing loading indicators while waiting for API responses
+    * Missing CORS configuration in backend (causes silent failures)
+    * Inconsistent API endpoint URLs between frontend and backend
+    * Missing response validation before rendering data (prevents blank screens)
+    * Missing console.log for API debugging during development
 
 RULES:
   1. Only suggest things that can be done by MODIFYING existing files

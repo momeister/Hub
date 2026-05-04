@@ -23,6 +23,12 @@ def critic_review_blueprint(goal: str, blueprint: dict, manager_model: str) -> d
     )
     dep_content = blueprint.get("dependencies", {}).get("content", "")[:500]
 
+    api_endpoints = blueprint.get("api_endpoints", [])
+    api_summary = ""
+    if api_endpoints:
+        ep_lines = [f"  - {ep.get('method', '?')} {ep.get('path', '?')}: {ep.get('description', '')}" for ep in api_endpoints]
+        api_summary = f"\n  API Endpoints ({len(api_endpoints)}):\n" + "\n".join(ep_lines)
+
     prompt = f"""You are a code project reviewer. A blueprint was generated for this goal:
 
 GOAL: "{goal}"
@@ -33,7 +39,7 @@ BLUEPRINT SUMMARY:
   Files ({len(files)}):
 {file_summary}
   Dependency order: {dep_order[:20]}
-  Dependencies: {dep_content[:300]}
+  Dependencies: {dep_content[:300]}{api_summary}
 
 Review for these issues ONLY:
 1. WRONG LANGUAGE: Does the language fit the goal? (e.g. game -> HTML+JS, CLI -> python/go)
@@ -41,6 +47,13 @@ Review for these issues ONLY:
 3. EXCESS FILES: Too many files for a simple project? (>8 files for simple, >15 for medium)
 4. DEP ORDER: Will the build order cause import failures?
 5. GOAL MISMATCH: Does the file plan actually implement what was asked?
+6. FULLSTACK CONSISTENCY (only for projects with both frontend and backend):
+   - Are API endpoint URLs consistent between frontend and backend files?
+   - Is there a CORS configuration or proxy setup in the backend?
+   - Do the planned data formats match between frontend expectations and backend responses?
+   - Is there a frontend API module/layer for making backend calls?
+   - Are data transformation utilities planned when backend format differs from frontend format?
+   - Does the architecture include proper error handling for API calls?
 
 Output ONLY this JSON:
 """ + """{

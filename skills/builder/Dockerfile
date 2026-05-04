@@ -26,7 +26,13 @@ COPY core/ ./core/
 COPY skills/__init__.py ./skills/__init__.py
 COPY skills/builder/ ./skills/builder/
 
+# Output directory (shared with host for approval signals and project files)
+VOLUME ["/app/output"]
+
 # Force JSON-line output mode for Docker builds
 ENV TRIGGERED_BY=telegram
+
+# Uncomment to skip UX polish phase for faster builds:
+# ENV BUILDER_SKIP_POLISH=1
 
 ENTRYPOINT ["python", "-u", "-m", "skills.builder.builder_core"]

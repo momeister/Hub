@@ -239,9 +239,12 @@ def run_builder(chat_id: int, answers: dict) -> None:
                 flist = parsed.get("files", [])
                 complexity = parsed.get("complexity", "")
                 arch_decs = parsed.get("architecture_decisions", [])
+                build_token = parsed.get("build_token", "")
 
                 tg_state.build_state["current_action"] = "Waiting for user approval"
                 tg_state.build_state["language"] = lang
+                # Store the build token so the approval callback can include it
+                tg_state.build_token = build_token
 
                 file_list_str = "\n".join(f"  `{f}`" for f in flist[:15])
                 if len(flist) > 15:
@@ -422,6 +425,7 @@ def run_builder(chat_id: int, answers: dict) -> None:
     finally:
         tg_state.active_build = None
         tg_state.active_build_proc = None
+        tg_state.build_token = ""
         # Clean up approval signal file
         try:
             sp = getattr(tg_state, 'build_signal_path', None)
