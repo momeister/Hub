@@ -7,13 +7,13 @@ local LLMs (Ollama) with a 5-agent pipeline architecture.
 ## Hardware Requirements
 
 Tested for:
-- **GPU**: NVIDIA RTX 5070 Ti (12GB VRAM) or similar
+- **GPU**: NVIDIA RTX 5070 Ti (16GB VRAM) or similar
 - **RAM**: 64GB system memory
-- **OS**: Windows 10/11
+- **OS**: Windows 11
 - **Storage**: SSD recommended for model loading speed
 
-Models are loaded **sequentially** (one at a time) to fit in VRAM.
-With 64GB RAM, the system can handle 128k context windows via `qwen3-coder-next`.
+Models are loaded **sequentially** (one at a time) to work.
+With 64GB RAM, the system can handle bigger models like `qwen3-coder-next`.
 
 ## Quick Start
 
@@ -25,6 +25,8 @@ With 64GB RAM, the system can handle 128k context windows via `qwen3-coder-next`
 - A Telegram Bot token (from [@BotFather](https://t.me/BotFather))
 
 ### 2. Pull Required Models
+*(Models can be changed)*
+
 
 ```bash
 ollama pull glm4:9b
@@ -120,7 +122,7 @@ User Instruction (Telegram)
 
 ### Why Sequential Agents?
 
-With 12GB VRAM, only one large model fits at a time. The pipeline is designed so:
+With 16GB VRAM + 64GB RAM, only one large model fits at a time. The pipeline is designed so:
 - **Planner** loads the manager model (reasoning-heavy)
 - **Retriever** runs CPU-only (manager model can be unloaded)
 - **Coder** loads the coder model (code generation)
@@ -129,18 +131,15 @@ With 12GB VRAM, only one large model fits at a time. The pipeline is designed so
 
 ## Build Modes
 
-| Mode | Manager | Coder | Context | Best For |
-|------|---------|-------|---------|----------|
-| FAST | deepseek-r1:8b | qwen2.5-coder:7b | 64k | Quick prototypes |
-| AVERAGE | deepseek-r1:32b | qwen2.5-coder:14b | 64k | Balanced quality/speed |
-| GOD MODE | gpt-oss:120b | qwen3-coder-next | 128k | Maximum quality |
-| UNCENSORED | qwen3-coder-next-abliterated | same | 128k | No content filters |
-| CUSTOM | your choice | your choice | custom | Full control |
+| Mode | Manager | Coder | Best For |
+|------|---------|-------|----------|
+| FAST | deepseek-r1:8b | qwen2.5-coder:7b | Quick prototypes |
+| AVERAGE | deepseek-r1:32b | qwen2.5-coder:14b | Balanced quality/speed |
+| GOD MODE | gpt-oss:120b | qwen3-coder-next | Maximum quality |
+| UNCENSORED | qwen3-coder-next-abliterated | same | No content filters |
+| CUSTOM | your choice | your choice | Full control |
 
 ## Context Window
-
-With RTX 5070 Ti + 64GB RAM, `qwen3-coder-next` supports **131,072 tokens** (128k).
-This is set as the default for GOD MODE and UNCENSORED modes.
 
 The context window is used efficiently:
 - Skeleton phase: all file signatures in one call
